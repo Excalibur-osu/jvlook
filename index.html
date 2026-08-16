@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>jvlook</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <nav class="tabs" id="plateTabs"></nav>
+</header>
+
+<div id="labelBar" class="labelbar"></div>
+
+<main id="listView" class="container">
+  <div id="grid" class="grid"></div>
+  <div id="loadMoreSentinel" class="sentinel"></div>
+  <div id="listStatus" class="status"></div>
+</main>
+
+<div id="detailView" class="overlay hidden">
+  <div class="playerBox">
+    <video id="player" controls playsinline preload="metadata"></video>
+    <div id="playerHint" class="playerHint hidden">无法播放：HLS 组件加载失败且该视频没有 MP4 线路。<br>请检查网络（hls.js 需要联网加载），或返回列表换个视频。</div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<div id="loading" class="loading hidden"><div class="spinner"></div><p id="loadingText">加载中…</p></div>
+
+<script src="js/core.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
