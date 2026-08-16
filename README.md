@@ -11,7 +11,7 @@
 ## 数据来源
 
 - 内容站点：中文大全（jvlook 镜像网络），plateId 4 = 短视频，plateId 5 = 长视频
-- 接口后端：https://zdap.gkquu.cn:4438/zd/（ASP.NET / IIS 8.5，应用名 zd-app）
+- 接口后端：[https://zdap.gkquu.cn:4438/zd/](https://zdap.gkquu.cn:4438/zd/)（ASP.NET / IIS 8.5，应用名 zd-app）
 
 ## 接口协议
 
@@ -45,7 +45,7 @@
 
 ## 自适应
 
-- 发布页：默认 https://jvlook.top/（接口 publishPage 字段动态下发）
+- 发布页：默认 [https://jvlook.top/](https://jvlook.top/)（接口 publishPage 字段动态下发）
   - 域名表在 js/aes.js，AES 加密：CryptoJS 格式（"Salted__" + salt + 密文，
     EVP_BytesToKey(MD5) 派生 key/iv，AES-256-CBC），密钥 zdzd#@%@#
   - 用 script 标签跨域加载（浏览器 CORS 限制，脚本标签不受限）
