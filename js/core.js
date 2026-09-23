@@ -5,15 +5,11 @@
   var AES_KEY = 'mh_aes=19@#$@%@#';
   var AES_IV = '5e1y6w452uqw9jq8';
   var NONCE_CHARS = 'ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678';
-  var FALLBACK_HOST = 'dwkkjs4.jvlookzw04.cn';
   var API_BASES = [
     'https://zdap.gkquu.cn:4438/zd/',
-    'https://zdapi.421573.top/zd/',
-    'https://zdap2.gkquu.cn/zd/',
-    'https://zdap3.gkquu.cn/zd/',
-    'https://api.gkquu.cn/zd/'
+    'https://zdapi.421573.top/zd/'
   ];
-  var FRONT_HOSTS = ['dwkkjs4.jvlookzw04.cn'];
+  var FRONT_HOSTS = ['kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn'];
   for (var _hostI = 1; _hostI <= 20; _hostI++) FRONT_HOSTS.push('dwkkjs' + _hostI + '.jvlookzw04.cn');
   FRONT_HOSTS.push('jvlookzw04.cn', 'www.jvlookzw04.cn', 'zwfb.mmjvlook.top', 'jvlook.com');
   var PUBLISH_PAGES = ['https://jvlook.top/'];
@@ -119,7 +115,10 @@
       for (var i = 0; i < str.length * 8; i += 8) bin[i >> 5] |= (str.charCodeAt(i / 8) & mask) << (i % 32);
       return bin;
     }
-    var data = unescape(encodeURIComponent(String(input)));
+    // EVP_BytesToKey hashes raw binary digests, without UTF-8 re-encoding.
+    var data = input instanceof Uint8Array
+      ? Array.from(input, function (b) { return String.fromCharCode(b); }).join('')
+      : unescape(encodeURIComponent(String(input)));
     return binl2hex(binlMD5(str2binl(data), data.length * 8));
   }
   function nonce16() {
@@ -136,11 +135,11 @@
   }
   var _memGuid = null;
   function getGuid() {
-    if (typeof localStorage !== 'undefined') {
+    try {
       var g = localStorage.getItem('guid');
       if (!g) { g = newGuid(); localStorage.setItem('guid', g); }
       return g;
-    }
+    } catch (e) {}
     if (!_memGuid) _memGuid = newGuid();
     return _memGuid;
   }
@@ -200,17 +199,34 @@
       'url': hostOverride || hostHeader()
     };
   }
-  async function apiGet(path, params) {
+  async function apiGet(path, params, recovery) {
+    recovery = recovery || { login: false, host: false, api: false };
     var g = getGuid();
     var ts = String(Date.now());
     var nc = nonce16();
     var sign = md5(ts + g + nc + SALT).toUpperCase();
     var qs = Object.keys(params || {}).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
-    var resp = await requestWithRetry(runtime.apiBase + path + (qs ? '?' + qs : ''), { headers: baseHeaders(g, sign, ts, nc) });
+    var resp;
+    try {
+      resp = await requestWithRetry(runtime.apiBase + path + (qs ? '?' + qs : ''), { headers: baseHeaders(g, sign, ts, nc) });
+    } catch (e) {
+      if (!recovery.api) {
+        recovery.api = true;
+        if (await rotateApiBase()) return apiGet(path, params, recovery);
+      }
+      throw e;
+    }
     var j = await resp.json();
     if (j.returnValue !== 1) {
-      if (j.returnValue === 998 || j.returnValue === 1000) { await ensureLogin(true); return apiGet(path, params); }
-      if (j.returnValue === 3 && await rotateFrontHost()) return apiGet(path, params);
+      if ((j.returnValue === 998 || j.returnValue === 1000) && !recovery.login) {
+        recovery.login = true;
+        await ensureLogin(true);
+        return apiGet(path, params, recovery);
+      }
+      if (j.returnValue === 3 && !recovery.host) {
+        recovery.host = true;
+        if (await rotateFrontHost()) return apiGet(path, params, recovery);
+      }
       throw new Error(j.msg || ('API 错误 ' + j.returnValue));
     }
     return parseReturn(j);
@@ -265,9 +281,14 @@
           await sleepMs(500 * Math.pow(2, attempt - 1) + Math.random() * 400);
           continue;
         }
+        if (!resp.ok) {
+          var error = new Error('HTTP ' + resp.status);
+          error.status = resp.status;
+          throw error;
+        }
         return resp;
       } catch (e) {
-        if (attempt >= attempts) throw e;
+        if (attempt >= attempts || (e.status && e.status < 500)) throw e;
         await sleepMs(500 * Math.pow(2, attempt - 1) + Math.random() * 400);
       }
     }
@@ -288,7 +309,7 @@
         apiBase: runtime.apiBase,
         frontHost: runtime.frontHost,
         publishPage: runtime.publishPage,
-        ts: Date.now()
+        ts: runtime.configTs
       }));
     } catch (e) {}
   }
@@ -346,6 +367,7 @@
         finished = true;
         clearTimeout(timer);
         s.onload = s.onerror = null;
+        s.remove();
         resolve(ok);
       }
       s.onload = function () { finish(true); };
@@ -355,9 +377,7 @@
     });
   }
   function md5Bytes(bytes) {
-    var s = '';
-    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    var hex = md5(s);
+    var hex = md5(bytes);
     var out = new Uint8Array(16);
     for (var j = 0; j < 16; j++) out[j] = parseInt(hex.substr(j * 2, 2), 16);
     return out;
@@ -428,7 +448,12 @@
       return j2.returnValue === 1;
     } catch (e) { return false; }
   }
-  async function rotateFrontHost() {
+  var _frontRotation = null;
+  function rotateFrontHost() {
+    if (!_frontRotation) _frontRotation = findFrontHost().finally(function () { _frontRotation = null; });
+    return _frontRotation;
+  }
+  async function findFrontHost() {
     var candidates = FRONT_HOSTS.filter(function (h) { return h !== runtime.frontHost; });
     for (var i = 0; i < candidates.length; i++) {
       if (await verifyFrontHost(candidates[i])) {
@@ -437,13 +462,14 @@
         return true;
       }
     }
-    return false;
+    return discoverFrontHost();
   }
   async function discoverFrontHost() {
-    if (runtime.__aesLoaded) return false;
-    var loaded = await loadScriptNoCors(runtime.publishPage + 'js/aes.js', 5000);
-    if (!loaded) return false;
-    runtime.__aesLoaded = true;
+    if (!runtime.__aesLoaded) {
+      var loaded = await loadScriptNoCors(new URL('js/aes.js', runtime.publishPage).href, 5000);
+      if (!loaded) return false;
+      runtime.__aesLoaded = true;
+    }
     var key = null;
     try { key = (typeof aesKey !== 'undefined') ? aesKey : null; } catch (e) { key = null; }
     var list = (typeof window !== 'undefined' && window.address) ? window.address : null;
@@ -491,7 +517,12 @@
     saveConfig();
     return runtime;
   }
-  async function rotateApiBase() {
+  var _apiRotation = null;
+  function rotateApiBase() {
+    if (!_apiRotation) _apiRotation = findApiBase().finally(function () { _apiRotation = null; });
+    return _apiRotation;
+  }
+  async function findApiBase() {
     var candidates = uniqueCandidates().filter(function (b) { return b !== runtime.apiBase; });
     for (var i = 0; i < candidates.length; i++) {
       var probe = await signedProbe(candidates[i]);

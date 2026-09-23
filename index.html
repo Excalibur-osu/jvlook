@@ -10,6 +10,14 @@
 <body>
 <header class="topbar">
   <nav class="tabs" id="plateTabs"></nav>
+  <button id="searchToggle" class="btn search-toggle" type="button" aria-label="打开搜索" aria-expanded="false" aria-controls="searchForm" title="搜索">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"></path></svg>
+  </button>
+  <form id="searchForm" class="searchbar hidden" role="search" aria-label="搜索当前分区">
+    <input id="searchInput" type="search" aria-label="搜索当前分区" placeholder="搜索当前分区…" autocomplete="off">
+    <button type="submit" class="btn">搜索</button>
+    <button type="button" id="clearSearch" class="btn hidden">清空</button>
+  </form>
 </header>
 
 <div id="labelBar" class="labelbar"></div>
@@ -17,7 +25,8 @@
 <main id="listView" class="container">
   <div id="grid" class="grid"></div>
   <div id="loadMoreSentinel" class="sentinel"></div>
-  <div id="listStatus" class="status"></div>
+  <div id="listStatus" class="status" role="status"></div>
+  <button id="retryList" type="button" class="btn retry hidden">重新加载</button>
 </main>
 
 <div id="detailView" class="overlay hidden">

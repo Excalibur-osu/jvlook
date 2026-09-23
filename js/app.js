@@ -1,13 +1,16 @@
 (function () {
   'use strict';
   var PLATES = [
-    { id: 4, name: '短视频', path: '/plate1' },
+    { id: 4, name: '短视频1', path: '/plate1' },
+    { id: 19, name: '短视频2', path: '/plate6' },
     { id: 5, name: '长视频', path: '/plate2' }
   ];
   var PAGE_SIZE = 25;
   var MAX_INITIAL_ITEMS = 125;
   var state = {
     plateId: 4,
+    keyword: '',
+    revision: 0,
     labels: [],
     labelId: null,
     page: 0,
@@ -21,6 +24,9 @@
     activeLine: 0
   };
   var hlsInstance = null;
+  var detailRevision = 0;
+  var playbackRevision = 0;
+  var hlsPromise = null;
   var videoEl = document.getElementById('player');
   var sentinel = document.getElementById('loadMoreSentinel');
   var sentinelIO = null;
@@ -29,7 +35,6 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
-  function $(sel, root) { return (root || document).querySelector(sel); }
   function show(id) { document.getElementById(id).classList.remove('hidden'); }
   function hide(id) { document.getElementById(id).classList.add('hidden'); }
   function toast(msg) {
@@ -43,46 +48,47 @@
     document.getElementById('loading').classList.toggle('hidden', !on);
     document.getElementById('loadingText').textContent = text || '加载中…';
   }
+  var HLS_CDNS = [
+    'https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js',
+    'https://unpkg.com/hls.js@1.7.3/dist/hls.min.js'
+  ];
+  function loadScript(src) {
+    return new Promise(function (resolve) {
+      var s = document.createElement('script');
+      var timer = setTimeout(function () { finish(false); }, 8000);
+      function finish(ok) {
+        clearTimeout(timer);
+        s.onload = s.onerror = null;
+        if (!ok) s.remove();
+        resolve(ok);
+      }
+      s.src = src;
+      s.onload = function () { finish(true); };
+      s.onerror = function () { finish(false); };
+      document.head.appendChild(s);
+    });
+  }
+  function ensureHls() {
+    if (window.Hls) return Promise.resolve(true);
+    if (hlsPromise) return hlsPromise;
+    hlsPromise = (async function () {
+      for (var i = 0; i < HLS_CDNS.length; i++) {
+        if (await loadScript(HLS_CDNS[i]) && window.Hls) return true;
+      }
+      return false;
+    })().finally(function () { hlsPromise = null; });
+    return hlsPromise;
+  }
   function fmtDur(d) {
     if (!d) return '';
     return String(d).replace(/^0+:0?/, '');
   }
-  function timeAgo(sec) {
-    if (!sec) return '';
-    var diff = Date.now() - sec * 1000;
-    if (diff < 0) return '';
-    var m = Math.floor(diff / 60000), h = Math.floor(m / 60), d2 = Math.floor(h / 24);
-    if (d2 > 0) return d2 + ' 天前';
-    if (h > 0) return h + ' 小时前';
-    if (m > 0) return m + ' 分钟前';
-    return '刚刚';
-  }
-  var HLS_CDNS = [
-    'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js',
-    'https://unpkg.com/hls.js@1.5.20/dist/hls.min.js'
-  ];
-  function loadScript(src) {
-    return new Promise(function (res) {
-      var s = document.createElement('script');
-      s.src = src;
-      s.onload = function () { res(true); };
-      s.onerror = function () { res(false); };
-      document.head.appendChild(s);
-    });
-  }
-  async function ensureHls() {
-    if (window.Hls) return true;
-    for (var i = 0; i < HLS_CDNS.length; i++) {
-      if (await loadScript(HLS_CDNS[i]) && window.Hls) return true;
-    }
-    return false;
-  }
   function cardHtml(v) {
     return '<div class="card" role="button" tabindex="0" data-plate="' + esc(v.plateId) + '" data-video="' + esc(v.videoId) + '">' +
       '<div class="thumb"><img loading="lazy" src="' + esc(v.videoCover || '') + '" alt="" onerror="this.parentNode.classList.add(&quot;noimg&quot;);this.style.display=&quot;none&quot;">' +
-      '<span class="dur">' + esc(fmtDur(v.duration)) + '</span></div>' +
+      (v.duration ? '<span class="dur">' + esc(fmtDur(v.duration)) + '</span>' : '') + '</div>' +
       '<div class="info"><div class="t">' + esc(v.videoTitle) + '</div>' +
-      '<div class="u"><span class="u-name">' + esc(v.nickName || '') + '</span><span class="u-time">' + (v.updatedTime ? timeAgo(v.updatedTime) : '') + '</span></div></div></div>';
+      '<div class="u"><span class="u-name">' + esc(v.nickName || '') + '</span></div></div></div>';
   }
   function renderTabs() {
     var box = document.getElementById('plateTabs');
@@ -103,7 +109,7 @@
   function renderLabelBar() {
     var box = document.getElementById('labelBar');
     box.innerHTML = '';
-    if (state.labels.length <= 1) { hide('labelBar'); return; }
+    if (state.keyword || state.labels.length <= 1) { hide('labelBar'); return; }
     show('labelBar');
     state.labels.forEach(function (l) {
       var b = document.createElement('button');
@@ -118,87 +124,107 @@
       box.appendChild(b);
     });
   }
+  function resetList() {
+    state.revision += 1;
+    state.loading = false;
+    state.page = 0;
+    state.seen = {};
+    state.exhausted = false;
+    state.items = [];
+    state.failCount = 0;
+    document.getElementById('grid').innerHTML = '';
+    document.getElementById('listStatus').textContent = '加载中…';
+    hide('retryList');
+  }
   async function loadLabels() {
+    resetList();
+    var revision = state.revision;
+    var plateId = state.plateId;
     state.labelId = null;
-    setLoading(true, '获取分类…');
-    try {
-      var data = await Core.apiGet('sp/getPlateLabelList', { plateId: state.plateId });
-      var ls = (data.plateCenter && data.plateCenter.plateLabelList) || [];
-      state.labels = ls;
-    } catch (e) {
-      state.labels = [];
-    }
-    if (!state.labels.length) state.labels = [{ exploreLabelId: state.plateId, exploreLabelName: '全部' }];
-    state.labelId = state.labels[0].exploreLabelId;
+    state.labels = [];
     renderLabelBar();
-    await loadVideos(true);
-    setLoading(false);
+    if (state.keyword) { loadVideos(true); return; }
+    try {
+      var data = await Core.apiGet('sp/getPlateLabelList', { plateId: plateId });
+      if (revision !== state.revision) return;
+      state.labels = (data.plateCenter && data.plateCenter.plateLabelList) || [];
+      if (!state.labels.length) throw new Error('该分区暂时没有分类');
+      state.labelId = state.labels[0].exploreLabelId;
+      renderLabelBar();
+      await loadVideos(true);
+    } catch (e) {
+      if (revision !== state.revision) return;
+      document.getElementById('listStatus').textContent = '分类加载失败：' + e.message;
+      show('retryList');
+    }
   }
   async function loadVideos(reset) {
-    if (state.loading) return;
-    if (state.labelId === null || state.labelId === undefined) return;
-    if (reset) {
-      state.page = 0; state.seen = {}; state.exhausted = false; state.items = [];
-      state.failCount = 0;
-      document.getElementById('grid').innerHTML = '';
-      document.getElementById('listStatus').textContent = '';
-    } else if (state.exhausted) {
-      return;
-    }
+    if (!state.keyword && state.labelId == null) return;
+    if (reset) resetList();
+    else if (state.loading || state.exhausted || state.failCount) return;
+    var revision = state.revision;
+    var plateId = state.plateId;
+    var keyword = state.keyword;
+    var labelId = state.labelId;
     state.loading = true;
-    if (document.getElementById('loading').classList.contains('hidden')) {
-      document.getElementById('listStatus').textContent = '加载中…';
-    }
+    document.getElementById('listStatus').textContent = keyword ? '正在搜索“' + keyword + '”…' : '加载中…';
+    hide('retryList');
     try {
       var pages = reset ? Math.max(1, Math.ceil(initialFillCount() / PAGE_SIZE)) : 2;
-      var startPage = reset ? 1 : state.page + 1;
-      var firstError = null;
+      var startPage = state.page + 1;
       var fetched = await Promise.all(Array.from({ length: pages }, function (_, i) {
-        return Core.apiGet('sp/getLabelVideoList', {
-          plateId: state.plateId,
-          labelId: state.labelId,
-          page: startPage + i,
-          size: PAGE_SIZE
-        }).catch(function (e) { if (firstError === null) firstError = e; return null; });
+        var params = { plateId: plateId, page: startPage + i, size: PAGE_SIZE };
+        if (keyword) params.searchName = keyword;
+        else params.labelId = labelId;
+        return Core.apiGet(keyword ? 'sp/getSearchList' : 'sp/getLabelVideoList', params)
+          .then(function (data) { return { data: data }; }, function (error) { return { error: error }; });
       }));
-      var first = fetched[0];
-      if (first === null) throw firstError || new Error('请求失败');
-      var list = [];
+      if (revision !== state.revision) return;
+      // Only commit consecutive successful pages, so failed pages are never skipped.
       for (var i = 0; i < fetched.length; i++) {
-        if (fetched[i] === null) continue;
-        list = list.concat((fetched[i].videoList || []).filter(function (v) { return v && !v.isAd; }));
-      }
-      var fresh = [];
-      for (var j = 0; j < list.length; j++) {
-        var id = String(list[j].videoId);
-        if (state.seen[id]) continue;
-        state.seen[id] = true;
-        fresh.push(list[j]);
-      }
-      list = fresh;
-      if (list.length === 0) state.exhausted = true;
-      state.page = startPage + pages - 1;
-      state.items = state.items.concat(list);
-      if (list.length) {
-        document.getElementById('grid').insertAdjacentHTML('beforeend', list.map(cardHtml).join(''));
+        if (fetched[i].error) throw fetched[i].error;
+        var videos = fetched[i].data && fetched[i].data.videoList;
+        if (!Array.isArray(videos)) throw new Error('视频列表格式异常');
+        var list = videos.filter(function (v) {
+          if (!v || v.isAd || v.videoId == null) return false;
+          var id = String(v.plateId || plateId) + ':' + String(v.videoId);
+          if (state.seen[id]) return false;
+          state.seen[id] = true;
+          if (v.plateId == null) v.plateId = plateId;
+          return true;
+        });
+        state.page = startPage + i;
+        state.items = state.items.concat(list);
+        if (list.length) document.getElementById('grid').insertAdjacentHTML('beforeend', list.map(cardHtml).join(''));
+        if (!videos.length || (!list.length && videos.some(function (v) { return v && !v.isAd; }))) {
+          state.exhausted = true;
+          break;
+        }
       }
       state.failCount = 0;
-      document.getElementById('listStatus').textContent = state.exhausted
-        ? '已全部加载 ' + state.items.length + ' 条'
-        : '已加载 ' + state.items.length + ' 条';
+      var prefix = keyword ? '“' + keyword + '” · ' : '';
+      document.getElementById('listStatus').textContent = prefix + (!state.items.length && state.exhausted
+        ? (keyword ? '没有找到相关视频' : '暂无视频')
+        : (state.exhausted ? '已全部加载 ' : '已加载 ') + state.items.length + ' 条');
       if (!state.exhausted && isSentinelNear()) {
-        setTimeout(function () { loadVideos(false); }, 100);
+        setTimeout(function () { if (revision === state.revision) loadVideos(false); }, 100);
       }
     } catch (e) {
+      if (revision !== state.revision) return;
       state.failCount += 1;
-      if (state.failCount === 1) { Core.rotateApiBase().catch(function () {}); }
-      toast('列表加载失败：' + e.message);
-      document.getElementById('listStatus').textContent = '加载失败，滚动后自动重试';
-      if (state.failCount <= 3) setTimeout(retriggerSentinel, 2500);
-      else document.getElementById('listStatus').textContent = '多次加载失败，请稍后刷新页面重试';
+      document.getElementById('listStatus').textContent = '加载失败：' + e.message;
+      show('retryList');
     } finally {
-      state.loading = false;
+      if (revision === state.revision) state.loading = false;
     }
+  }
+  function search(keyword) {
+    state.keyword = keyword.trim();
+    document.getElementById('searchInput').value = state.keyword;
+    document.getElementById('clearSearch').classList.toggle('hidden', !state.keyword);
+    document.getElementById('searchToggle').classList.toggle('searching', !!state.keyword);
+    window.scrollTo(0, 0);
+    loadLabels();
   }
   function isSentinelNear() {
     var rect = sentinel.getBoundingClientRect();
@@ -216,9 +242,6 @@
     var rows = Math.ceil(vh / Math.max(cardHeight, 180)) + 1;
     return Math.min(MAX_INITIAL_ITEMS, Math.max(PAGE_SIZE, cols * rows));
   }
-  function retriggerSentinel() {
-    if (sentinelIO) { sentinelIO.unobserve(sentinel); sentinelIO.observe(sentinel); }
-  }
   function setupInfiniteScroll() {
     if (typeof IntersectionObserver !== 'undefined') {
       sentinelIO = new IntersectionObserver(function (entries) {
@@ -234,9 +257,11 @@
     }
   }
   function autoplay(v) {
+    var revision = playbackRevision;
     var p = v.play();
     if (p === undefined) return;
     p.catch(function () {
+      if (revision !== playbackRevision) return;
       v.muted = true;
       var q = v.play();
       if (q !== undefined) q.catch(function () {});
@@ -244,6 +269,7 @@
     });
   }
   function destroyHls() {
+    playbackRevision += 1;
     if (hlsInstance) { try { hlsInstance.destroy(); } catch (e) {} hlsInstance = null; }
     videoEl.pause();
     videoEl.muted = false;
@@ -262,6 +288,7 @@
     state.activeLine = i;
     hide('playerHint');
     destroyHls();
+    var revision = playbackRevision;
     var url = state.lines[i].url;
     videoEl.poster = (state.detail && state.detail.videoCover) || '';
     if (!/\.m3u8/i.test(url)) {
@@ -269,7 +296,8 @@
       autoplay(videoEl);
       return;
     }
-    await ensureHls();
+    if (!videoEl.canPlayType('application/vnd.apple.mpegurl')) await ensureHls();
+    if (revision !== playbackRevision) return;
     if (window.Hls && window.Hls.isSupported()) {
       var h = new window.Hls({ enableWorker: true });
       h.loadSource(url);
@@ -296,12 +324,16 @@
     }
   }
   async function openDetail(plateId, videoId) {
+    var revision = ++detailRevision;
+    hide('playerHint');
     show('detailView');
     document.body.classList.add('noScroll');
     destroyHls();
     try {
       var data = await Core.apiGet('sp/getVideoDetail', { plateId: plateId, videoId: videoId });
+      if (revision !== detailRevision) return;
       var vd = data.videoDetail;
+      if (!vd) throw new Error('视频详情为空');
       state.detail = vd;
       state.lines = buildLines(vd);
       document.title = (vd.videoTitle || '播放') + ' · jvlook';
@@ -313,11 +345,13 @@
         playLine(hdIndex >= 0 ? hdIndex : 0);
       } else toast('该视频没有可用线路');
     } catch (e) {
+      if (revision !== detailRevision) return;
       toast('获取视频失败：' + e.message);
       backToList();
     }
   }
   function backToList() {
+    detailRevision += 1;
     document.title = 'jvlook';
     document.body.classList.remove('noScroll');
     destroyHls();
@@ -333,6 +367,39 @@
     if (!card) return;
     openDetail(card.getAttribute('data-plate'), card.getAttribute('data-video'));
   }
+  function closeSearch(restoreFocus) {
+    hide('searchForm');
+    document.getElementById('searchToggle').setAttribute('aria-expanded', 'false');
+    if (restoreFocus) document.getElementById('searchToggle').focus();
+  }
+  document.getElementById('searchToggle').addEventListener('click', function () {
+    if (this.getAttribute('aria-expanded') === 'true') { closeSearch(true); return; }
+    show('searchForm');
+    this.setAttribute('aria-expanded', 'true');
+    var input = document.getElementById('searchInput');
+    input.value = state.keyword;
+    input.focus();
+    input.select();
+  });
+  function dismissSearch(e) {
+    if (!e.target.closest('#searchForm, #searchToggle')) closeSearch(false);
+  }
+  document.addEventListener('click', dismissSearch);
+  document.addEventListener('focusin', dismissSearch);
+  document.getElementById('searchForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    search(document.getElementById('searchInput').value);
+    closeSearch(true);
+  });
+  document.getElementById('clearSearch').addEventListener('click', function () { search(''); closeSearch(true); });
+  document.getElementById('searchInput').addEventListener('search', function () {
+    if (!this.value && state.keyword) search('');
+  });
+  document.getElementById('retryList').addEventListener('click', function () {
+    state.failCount = 0;
+    if (!state.keyword && state.labelId == null) loadLabels();
+    else loadVideos(false);
+  });
   document.getElementById('grid').addEventListener('click', openCard);
   document.getElementById('grid').addEventListener('keydown', function (e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -343,20 +410,24 @@
     if (e.target === document.getElementById('detailView')) backToList();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') backToList();
+    if (e.key !== 'Escape') return;
+    if (document.getElementById('searchToggle').getAttribute('aria-expanded') === 'true') {
+      e.preventDefault();
+      closeSearch(true);
+    } else backToList();
   });
   window.addEventListener('hashchange', route);
   async function init() {
     renderTabs();
     backToList();
     setupInfiniteScroll();
-    ensureHls();
     setLoading(true, '初始化…');
     try { await Core.bootstrap(false); } catch (e) { console.warn('[boot] 配置自愈失败，使用默认配置', e); }
     try { await Core.ensureLogin(); } catch (e) {}
     var m = (location.hash || '').match(/^#\/detail\?plateId=(\d+)&videoId=(\d+)$/);
+    setLoading(false);
+    loadLabels();
     if (m) openDetail(m[1], m[2]);
-    else loadLabels();
   }
   init();
 })();
