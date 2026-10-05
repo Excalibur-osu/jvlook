@@ -8,7 +8,7 @@ const Core = require('../js/core.js');
 function isolatedCore(fetch, storage = new Map()) {
   const context = vm.createContext({
     fetch, crypto: crypto.webcrypto, TextEncoder, TextDecoder, Uint8Array,
-    atob, URL, AbortController,
+    atob, URL, URLSearchParams, AbortController,
     setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 10)), clearTimeout,
     localStorage: {
       getItem: key => storage.get(key),
@@ -19,6 +19,28 @@ function isolatedCore(fetch, storage = new Map()) {
   return context.Core;
 }
 const reply = (returnValue, returnData = {}) => new Response(JSON.stringify({ returnValue, returnData }));
+
+test('menus follow source IDs and names in supported route order, with defaults for missing data', () => {
+  const plates = Core.platesFromTabs({ plateList: [null, { plateVOList: [
+    { plateId: '23', plateName: '更新名称', platePath: '/plate7' },
+    { plateId: 99, plateName: '未支持分区', platePath: '/other' },
+    { plateId: null, plateName: '无效', platePath: '/plate1' }
+  ] }] });
+  assert.deepEqual(plates.map(p => p.path), ['/plate1', '/plate7', '/plate6', '/plate2']);
+  assert.equal(plates[1].id, 23);
+  assert.equal(plates[1].name, '更新名称');
+  assert.equal(plates[0].id, 4);
+  assert.deepEqual(Core.platesFromTabs({ plateList: {} }), Core.DEFAULT_PLATES);
+});
+
+test('detail routes preserve opaque and large source video IDs', () => {
+  for (const [plate, video] of [['4', '6487809'], ['22', 'QGFsekHG-j_z-hEkwg8J6'], ['19', '1979561089231919255']]) {
+    assert.deepEqual(Core.parseDetailRoute('#/detail?videoId=' + video + '&plateId=' + plate), { plateId: plate, videoId: video });
+  }
+  for (const hash of ['', '#/detail?plateId=22', '#/detail?plateId=x&videoId=test', '#/detail?plateId=22&videoId=%3Cscript%3E']) {
+    assert.equal(Core.parseDetailRoute(hash), null);
+  }
+});
 
 test('MD5 matches Node for UTF-8 text and binary salts/digests', () => {
   for (const value of ['', '中文 search', new Uint8Array([0, 127, 128, 255])]) {

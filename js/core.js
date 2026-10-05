@@ -9,9 +9,13 @@
     'https://zdap.gkquu.cn:4438/zd/',
     'https://zdapi.421573.top/zd/'
   ];
-  var FRONT_HOSTS = ['kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn'];
-  for (var _hostI = 1; _hostI <= 20; _hostI++) FRONT_HOSTS.push('dwkkjs' + _hostI + '.jvlookzw04.cn');
-  FRONT_HOSTS.push('jvlookzw04.cn', 'www.jvlookzw04.cn', 'zwfb.mmjvlook.top', 'jvlook.com');
+  var FRONT_HOSTS = ['kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn', 'jvlook.com'];
+  var DEFAULT_PLATES = [
+    { id: 4, name: '短视频', path: '/plate1' },
+    { id: 22, name: '成人视频', path: '/plate7' },
+    { id: 19, name: '成人天堂', path: '/plate6' },
+    { id: 5, name: '长视频', path: '/plate2' }
+  ];
   var PUBLISH_PAGES = ['https://jvlook.top/'];
   var CONFIG_KEY = 'zdplayer_config_v1';
   var CONFIG_TTL_MS = 24 * 3600 * 1000;
@@ -152,6 +156,25 @@
   }
   function hostHeader() {
     return runtime.frontHost;
+  }
+  function platesFromTabs(data) {
+    var byPath = {};
+    var groups = data && Array.isArray(data.plateList) ? data.plateList : [];
+    groups.forEach(function (group) {
+      var entries = group && Array.isArray(group.plateVOList) ? group.plateVOList : [];
+      entries.forEach(function (p) {
+        if (!p || !/^\d+$/.test(String(p.plateId)) || Number(p.plateId) <= 0 || !p.plateName) return;
+        byPath[p.platePath] = { id: Number(p.plateId), name: String(p.plateName), path: p.platePath };
+      });
+    });
+    return DEFAULT_PLATES.map(function (p) { return byPath[p.path] || { id: p.id, name: p.name, path: p.path }; });
+  }
+  function parseDetailRoute(hash) {
+    if (!/^#\/detail\?/.test(hash || '')) return null;
+    var params = new URLSearchParams(hash.slice(hash.indexOf('?') + 1));
+    var plateId = params.get('plateId'), videoId = params.get('videoId');
+    if (!/^[1-9]\d*$/.test(plateId || '') || !/^[A-Za-z0-9_-]+$/.test(videoId || '')) return null;
+    return { plateId: plateId, videoId: videoId };
   }
   function signParams(obj) {
     var keys = Object.keys(obj).sort();
@@ -542,7 +565,8 @@
   }
   var Core = {
     API_BASE: API_BASE, SALT: SALT, AES_KEY: AES_KEY, AES_IV: AES_IV, NONCE_CHARS: NONCE_CHARS,
-    API_BASES: API_BASES, FRONT_HOSTS: FRONT_HOSTS,
+    API_BASES: API_BASES, FRONT_HOSTS: FRONT_HOSTS, DEFAULT_PLATES: DEFAULT_PLATES,
+    platesFromTabs: platesFromTabs, parseDetailRoute: parseDetailRoute,
     md5: md5, nonce16: nonce16, newGuid: newGuid, getGuid: getGuid, deviceType: deviceType,
     hostHeader: hostHeader, signParams: signParams, aesDecryptB64: aesDecryptB64,
     apiGet: apiGet, apiPost: apiPost, ensureLogin: ensureLogin,

@@ -52,9 +52,11 @@ body.noScroll { overflow: hidden; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading p { color: var(--muted); font-size: 13px; margin: 0; }
 @media (max-width: 560px) {
-  .topbar { padding: 10px 8px; gap: 4px; }
-  .tabs { gap: 4px; }
+  .topbar { display: flex; padding: 10px 8px; gap: 6px; }
+  .tabs { flex: 1 1 auto; min-width: 0; justify-content: flex-start; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
   .tab { padding: 7px 8px; font-size: 12px; white-space: nowrap; }
+  .topbar > .search-toggle { flex: 0 0 36px; }
   .searchbar { right: 8px; width: calc(100% - 16px); }
   .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
   .overlay { padding: 6px; }
