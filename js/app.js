@@ -360,22 +360,37 @@
       backToList();
     }
   }
-  function backToList() {
+  function detailHash(plateId, videoId) {
+    return '#/detail?plateId=' + encodeURIComponent(plateId) + '&videoId=' + encodeURIComponent(videoId);
+  }
+  function clearDetailHash() {
+    if (!/^#\/detail\?/.test(location.hash || '')) return;
+    try { history.replaceState(null, '', location.pathname + location.search); }
+    catch (e) { location.hash = ''; }
+  }
+  function backToList(keepHash) {
     detailRevision += 1;
     document.title = 'jvlook';
     document.body.classList.remove('noScroll');
     destroyHls();
     hide('detailView');
+    if (!keepHash) clearDetailHash();
   }
   function route() {
     var detail = Core.parseDetailRoute(location.hash);
     if (detail) { openDetail(detail.plateId, detail.videoId); return; }
     backToList();
   }
+  function openCardById(plateId, videoId) {
+    if (!plateId || !videoId) return;
+    var hash = detailHash(plateId, videoId);
+    if (location.hash === hash) { openDetail(plateId, videoId); return; }
+    location.hash = hash;
+  }
   function openCard(e) {
     var card = e.target.closest('.card');
     if (!card) return;
-    openDetail(card.getAttribute('data-plate'), card.getAttribute('data-video'));
+    openCardById(card.getAttribute('data-plate'), card.getAttribute('data-video'));
   }
   function closeSearch(restoreFocus) {
     hide('searchForm');
@@ -415,7 +430,7 @@
   document.getElementById('grid').addEventListener('keydown', function (e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     var card = e.target.closest('.card');
-    if (card) { e.preventDefault(); openDetail(card.getAttribute('data-plate'), card.getAttribute('data-video')); }
+    if (card) { e.preventDefault(); openCardById(card.getAttribute('data-plate'), card.getAttribute('data-video')); }
   });
   document.getElementById('detailView').addEventListener('click', function (e) {
     if (e.target === document.getElementById('detailView')) backToList();
@@ -430,7 +445,7 @@
   window.addEventListener('hashchange', route);
   async function init() {
     renderTabs();
-    backToList();
+    backToList(true);
     setupInfiniteScroll();
     setLoading(true, '初始化…');
     try { await Core.bootstrap(false); } catch (e) { console.warn('[boot] 配置自愈失败，使用默认配置', e); }
@@ -441,6 +456,7 @@
       renderTabs();
     } catch (e) { console.warn('[tabs] 板块同步失败，使用默认菜单', e); }
     var detail = Core.parseDetailRoute(location.hash);
+    if (!detail) clearDetailHash();
     setLoading(false);
     loadLabels();
     if (detail) openDetail(detail.plateId, detail.videoId);

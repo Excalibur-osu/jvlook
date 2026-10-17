@@ -9,7 +9,7 @@
     'https://zdap.gkquu.cn:4438/zd/',
     'https://zdapi.421573.top/zd/'
   ];
-  var FRONT_HOSTS = ['kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn', 'jvlook.com'];
+  var FRONT_HOSTS = ['zwfb.mmjvlook.top', 'kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn', 'jvlook.com'];
   var DEFAULT_PLATES = [
     { id: 4, name: '短视频', path: '/plate1' },
     { id: 22, name: '成人视频', path: '/plate7' },
