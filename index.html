@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+<div class="stickyhead">
 <header class="topbar">
   <nav class="tabs" id="plateTabs"></nav>
   <button id="searchToggle" class="btn search-toggle" type="button" aria-label="打开搜索" aria-expanded="false" aria-controls="searchForm" title="搜索">
@@ -17,10 +18,11 @@
     <input id="searchInput" type="search" aria-label="搜索当前分区" placeholder="搜索当前分区…" autocomplete="off">
     <button type="submit" class="btn">搜索</button>
     <button type="button" id="clearSearch" class="btn hidden">清空</button>
+    <div id="hotSearch" class="hotsearch hidden" role="group" aria-label="热门搜索"></div>
   </form>
 </header>
-
 <div id="labelBar" class="labelbar"></div>
+</div>
 
 <main id="listView" class="container">
   <div id="grid" class="grid"></div>

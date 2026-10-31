@@ -9,7 +9,11 @@
     'https://zdap.gkquu.cn:4438/zd/',
     'https://zdapi.421573.top/zd/'
   ];
-  var FRONT_HOSTS = ['zwfb.mmjvlook.top', 'kklwqis10.jvlookzw04.cn', 'dwkkjs4.jvlookzw04.cn', 'jvlook.com'];
+  // The `url` header selects the source-site tenant. Only list hosts the API
+  // currently recognizes as the jvlook tenant here; redirect-only mirrors
+  // (zwfb.*, the publish page's "latest" entries) resolve to another CMS
+  // tenant and would silently switch the app to the placeholder 类型1-4 data.
+  var FRONT_HOSTS = ['jvlook.com', 'ifbbgjob.jvlookdp05.cn'];
   var DEFAULT_PLATES = [
     { id: 4, name: '短视频', path: '/plate1' },
     { id: 22, name: '成人视频', path: '/plate7' },
@@ -17,7 +21,7 @@
     { id: 5, name: '长视频', path: '/plate2' }
   ];
   var PUBLISH_PAGES = ['https://jvlook.top/'];
-  var CONFIG_KEY = 'zdplayer_config_v1';
+  var CONFIG_KEY = 'zdplayer_config_v2';
   var CONFIG_TTL_MS = 24 * 3600 * 1000;
   var runtime = {
     apiBase: API_BASES[0],
@@ -444,31 +448,32 @@
     }
     return found;
   }
-  var _verifyLabelId = null;
   async function verifyFrontHost(host) {
+    // A host is only usable when the API both resolves its labels and returns a
+    // video list. Redirect-only hosts still expose the old plate-4 labels but
+    // reject the list with rv 3, so checking labels alone is not enough.
     var g = getGuid();
     var ts = String(Date.now());
     var nc = nonce16();
     var sign = md5(ts + g + nc + SALT).toUpperCase();
     try {
-      if (_verifyLabelId === null) {
-        var r1 = await fetchWithTimeout(runtime.apiBase + 'sp/getPlateLabelList?plateId=4', { headers: baseHeaders(g, sign, ts, nc, host) }, 6000);
-        if (!r1.ok) return false;
-        var j1 = await r1.json();
-        if (j1.returnValue !== 1) return false;
-        var d1 = await parseReturn(j1);
-        var ls = (d1.plateCenter && d1.plateCenter.plateLabelList) || [];
-        if (!ls.length) return false;
-        _verifyLabelId = ls[0].exploreLabelId;
-      }
+      var r1 = await fetchWithTimeout(runtime.apiBase + 'sp/getPlateLabelList?plateId=4', { headers: baseHeaders(g, sign, ts, nc, host) }, 6000);
+      if (!r1.ok) return false;
+      var j1 = await r1.json();
+      if (j1.returnValue !== 1) return false;
+      var d1 = await parseReturn(j1);
+      var ls = (d1 && d1.plateCenter && d1.plateCenter.plateLabelList) || [];
+      if (!ls.length || ls[0].exploreLabelId == null) return false;
       var g2 = getGuid();
       var ts2 = String(Date.now());
       var nc2 = nonce16();
       var sign2 = md5(ts2 + g2 + nc2 + SALT).toUpperCase();
-      var r2 = await fetchWithTimeout(runtime.apiBase + 'sp/getLabelVideoList?plateId=4&labelId=' + encodeURIComponent(_verifyLabelId) + '&page=1&size=25', { headers: baseHeaders(g2, sign2, ts2, nc2, host) }, 6000);
+      var r2 = await fetchWithTimeout(runtime.apiBase + 'sp/getLabelVideoList?plateId=4&labelId=' + encodeURIComponent(ls[0].exploreLabelId) + '&page=1&size=1', { headers: baseHeaders(g2, sign2, ts2, nc2, host) }, 6000);
       if (!r2.ok) return false;
       var j2 = await r2.json();
-      return j2.returnValue === 1;
+      if (j2.returnValue !== 1) return false;
+      var d2 = await parseReturn(j2);
+      return !!(d2 && Array.isArray(d2.videoList));
     } catch (e) { return false; }
   }
   var _frontRotation = null;
@@ -509,11 +514,9 @@
       ranked.push({ host: m[1], rank: (isLatest ? 0 : 1) + (needsVpn ? 2 : 0) });
     }
     ranked.sort(function (a, b) { return a.rank - b.rank; });
-    for (var j = 0; j < ranked.length; j++) {
-      if (FRONT_HOSTS.indexOf(ranked[j].host) === -1) FRONT_HOSTS.push(ranked[j].host);
-    }
     for (var k = 0; k < ranked.length; k++) {
       if (await verifyFrontHost(ranked[k].host)) {
+        if (FRONT_HOSTS.indexOf(ranked[k].host) === -1) FRONT_HOSTS.push(ranked[k].host);
         runtime.frontHost = ranked[k].host;
         saveConfig();
         return true;
@@ -525,7 +528,10 @@
     var cached = loadCachedConfig();
     if (cached && cached.apiBase) {
       runtime.apiBase = cached.apiBase;
-      if (cached.frontHost) runtime.frontHost = cached.frontHost;
+      if (cached.frontHost) {
+        runtime.frontHost = cached.frontHost;
+        if (FRONT_HOSTS.indexOf(runtime.frontHost) === -1) FRONT_HOSTS.push(runtime.frontHost);
+      }
       if (cached.publishPage) runtime.publishPage = cached.publishPage;
       runtime.configTs = cached.ts || 0;
     }
@@ -565,7 +571,7 @@
   }
   var Core = {
     API_BASE: API_BASE, SALT: SALT, AES_KEY: AES_KEY, AES_IV: AES_IV, NONCE_CHARS: NONCE_CHARS,
-    API_BASES: API_BASES, FRONT_HOSTS: FRONT_HOSTS, DEFAULT_PLATES: DEFAULT_PLATES,
+    API_BASES: API_BASES, FRONT_HOSTS: FRONT_HOSTS, DEFAULT_PLATES: DEFAULT_PLATES, CONFIG_KEY: CONFIG_KEY,
     platesFromTabs: platesFromTabs, parseDetailRoute: parseDetailRoute,
     md5: md5, nonce16: nonce16, newGuid: newGuid, getGuid: getGuid, deviceType: deviceType,
     hostHeader: hostHeader, signParams: signParams, aesDecryptB64: aesDecryptB64,

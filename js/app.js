@@ -216,6 +216,51 @@
       if (revision === state.revision) state.loading = false;
     }
   }
+  var hotSearchLoaded = false;
+  var hotSearchPromise = null;
+  function renderHotSearch(items) {
+    var box = document.getElementById('hotSearch');
+    box.innerHTML = '';
+    if (!items.length) { hide('hotSearch'); return; }
+    var label = document.createElement('span');
+    label.className = 'hotsearch-label';
+    label.textContent = '热搜';
+    box.appendChild(label);
+    items.forEach(function (item) {
+      var name = String((item && item.searchName) || '').trim();
+      if (!name) return;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'hot-chip';
+      b.textContent = name;
+      b.title = name;
+      b.addEventListener('click', function () {
+        document.getElementById('searchInput').value = name;
+        search(name);
+        closeSearch(true);
+      });
+      box.appendChild(b);
+    });
+    show('hotSearch');
+  }
+  function loadHotSearch() {
+    if (hotSearchLoaded || hotSearchPromise) return;
+    hotSearchPromise = Core.apiGet('sp/getSearchWord', {}).then(function (data) {
+      hotSearchLoaded = true;
+      var list = (data && data.hotSearchList) || [];
+      var seen = {};
+      var picked = [];
+      for (var i = 0; i < list.length && picked.length < 10; i++) {
+        var name = String((list[i] && list[i].searchName) || '').trim();
+        if (!name || seen[name]) continue;
+        seen[name] = true;
+        picked.push({ searchName: name });
+      }
+      renderHotSearch(picked);
+    }).catch(function () {
+      hide('hotSearch');
+    }).finally(function () { hotSearchPromise = null; });
+  }
   function search(keyword) {
     state.keyword = keyword.trim();
     document.getElementById('searchInput').value = state.keyword;
@@ -401,6 +446,7 @@
     if (this.getAttribute('aria-expanded') === 'true') { closeSearch(true); return; }
     show('searchForm');
     this.setAttribute('aria-expanded', 'true');
+    loadHotSearch();
     var input = document.getElementById('searchInput');
     input.value = state.keyword;
     input.focus();

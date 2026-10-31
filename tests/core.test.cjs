@@ -100,7 +100,7 @@ test('rejected host recovery is bounded even if the target keeps rejecting', asy
   let requests = 0;
   const core = isolatedCore(async url => {
     if (url.includes('getPlateLabelList')) return reply(1, { plateCenter: { plateLabelList: [{ exploreLabelId: 1 }] } });
-    if (url.includes('getLabelVideoList')) return reply(1);
+    if (url.includes('getLabelVideoList')) return reply(1, { videoList: [] });
     requests++;
     return reply(3);
   });
@@ -112,5 +112,17 @@ test('failed API rotation expires cached configuration', async () => {
   const storage = new Map();
   const core = isolatedCore(async () => new Response('', { status: 503 }), storage);
   assert.equal(await core.rotateApiBase(), false);
-  assert.equal(JSON.parse(storage.get('zdplayer_config_v1')).ts, 0);
+  assert.equal(JSON.parse(storage.get(Core.CONFIG_KEY)).ts, 0);
+});
+
+test('legacy config with a redirect-only front host is discarded', async () => {
+  const storage = new Map([['zdplayer_config_v1', JSON.stringify({
+    apiBase: Core.API_BASES[1], frontHost: 'zwfb.mmjvlook.top', publishPage: 'https://jvlook.top/', ts: Date.now()
+  })]]);
+  const core = isolatedCore(async url => reply(1, url.includes('getNewTabList') ? { plateList: [], publishPage: [] } : {}), storage);
+  const runtime = await core.bootstrap(false);
+  assert.equal(runtime.apiBase, Core.API_BASES[0]);
+  assert.equal(runtime.frontHost, 'jvlook.com');
+  const saved = JSON.parse(storage.get(Core.CONFIG_KEY));
+  assert.equal(saved.frontHost, 'jvlook.com');
 });
