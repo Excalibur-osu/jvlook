@@ -5,9 +5,9 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const Core = require('../js/core.js');
 
-function isolatedCore(fetch, storage = new Map()) {
+function isolatedCore(fetch, storage = new Map(), cryptoImpl = crypto.webcrypto) {
   const context = vm.createContext({
-    fetch, crypto: crypto.webcrypto, TextEncoder, TextDecoder, Uint8Array,
+    fetch, crypto: cryptoImpl, TextEncoder, TextDecoder, Uint8Array,
     atob, URL, URLSearchParams, AbortController,
     setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 10)), clearTimeout,
     localStorage: {
@@ -48,6 +48,18 @@ test('MD5 matches Node for UTF-8 text and binary salts/digests', () => {
   }
 });
 
+test('decrypts API payloads without WebCrypto, as on a plain-HTTP origin', async () => {
+  const key = Buffer.from('mh_aes=19@#$@%@#');
+  const iv = Buffer.from('5e1y6w452uqw9jq8');
+  const plaintext = JSON.stringify({ videoList: [{ videoId: '6568297', videoTitle: '中文 标题' }] });
+  const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
+  const encoded = Buffer.concat([cipher.update(plaintext), cipher.final()]).toString('base64');
+  for (const cryptoImpl of [{}, undefined]) {
+    const core = isolatedCore(() => {}, new Map(), cryptoImpl);
+    assert.equal(await core.aesDecryptB64(encoded), plaintext);
+  }
+});
+
 test('decrypts CryptoJS publication addresses with binary EVP_BytesToKey', async () => {
   const pass = 'zdzd#@%@#';
   const salt = Buffer.from('80ff017fcc90ab22', 'hex');
@@ -60,6 +72,8 @@ test('decrypts CryptoJS publication addresses with binary EVP_BytesToKey', async
   const expected = 'https://example.com/?name=中文';
   const encoded = Buffer.concat([Buffer.from('Salted__'), salt, cipher.update(expected), cipher.final()]).toString('base64');
   assert.equal(await Core.aesCryptoJsDecrypt(encoded, pass), expected);
+  const noSubtle = isolatedCore(() => {}, new Map(), {});
+  assert.equal(await noSubtle.aesCryptoJsDecrypt(encoded, pass), expected);
 });
 
 test('blocked localStorage still yields a stable device identity', () => {

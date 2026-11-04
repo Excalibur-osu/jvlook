@@ -87,40 +87,223 @@
       '<div class="info"><div class="t">' + esc(v.videoTitle) + '</div>' +
       '<div class="u"><span class="u-name">' + esc(v.nickName || '') + '</span></div></div></div>';
   }
+  var labelCache = {};
+  var labelPending = {};
+  var menuPlateId = null;
+  var menuOpenedByHover = false;
+  var menuHoverOpen = null;
+  var menuHoverClose = null;
+
+  function labelName(l) {
+    return ((l && (l.exploreLabel || l.exploreLabelName)) + '').trim() || ('分类 ' + (l && l.exploreLabelId));
+  }
+  function labelsFor(plateId) {
+    return labelCache[plateId] || null;
+  }
+  // Categories are cached per section. Switching sections loads them once; the
+  // dropdown is only rendered for sections that actually have several.
+  function loadPlateLabels(plateId) {
+    if (labelCache[plateId]) return Promise.resolve(labelCache[plateId]);
+    if (labelPending[plateId]) return labelPending[plateId];
+    var promise = Core.apiGet('sp/getPlateLabelList', { plateId: plateId }).then(function (data) {
+      var labels = (data.plateCenter && data.plateCenter.plateLabelList) || [];
+      labelCache[plateId] = labels;
+      return labels;
+    });
+    labelPending[plateId] = promise;
+    promise.then(function () {}, function () {}).then(function () {
+      if (labelPending[plateId] === promise) labelPending[plateId] = null;
+    });
+    return promise;
+  }
+  function currentLabel(plateId) {
+    var labels = labelsFor(plateId);
+    if (!labels || plateId !== state.plateId || state.labelId == null) return null;
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i].exploreLabelId === state.labelId) return labels[i];
+    }
+    return null;
+  }
+  function updateTabAria() {
+    var tabs = document.querySelectorAll('#plateTabs .tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var plate = Number(tabs[i].parentNode.getAttribute('data-plate'));
+      tabs[i].setAttribute('aria-expanded', String(menuPlateId === plate));
+      var labels = labelsFor(plate);
+      var selected = currentLabel(plate);
+      var plateName = '';
+      for (var j = 0; j < PLATES.length; j++) if (PLATES[j].id === plate) plateName = PLATES[j].name;
+      var hasMenu = !!(labels && labels.length > 1);
+      tabs[i].setAttribute('aria-haspopup', hasMenu ? 'true' : 'false');
+      tabs[i].setAttribute('aria-label', (plateName || tabs[i].textContent) + (hasMenu && selected ? '，当前分类 ' + labelName(selected) : '') + (hasMenu ? '，可展开分类菜单' : ''));
+    }
+  }
   function renderTabs() {
+    // Rebuilding the tabs detaches any open popover's anchor.
+    closeTabMenu();
     var box = document.getElementById('plateTabs');
     box.innerHTML = '';
     PLATES.forEach(function (p) {
+      var item = document.createElement('div');
+      item.className = 'tab-item';
+      item.setAttribute('data-plate', String(p.id));
       var b = document.createElement('button');
+      b.type = 'button';
       b.className = 'tab' + (p.id === state.plateId ? ' active' : '');
-      b.textContent = p.name;
       b.setAttribute('aria-pressed', String(p.id === state.plateId));
-      b.addEventListener('click', function () {
-        if (state.plateId === p.id) return;
+      b.setAttribute('aria-haspopup', 'true');
+      b.setAttribute('aria-controls', 'tabMenu');
+      b.appendChild(document.createTextNode(p.name));
+      var labels = labelsFor(p.id);
+      var selected = currentLabel(p.id);
+      // Only sections with more than one category get a dropdown; the rest
+      // would just repeat their single category name.
+      var hasMenu = !!(labels && labels.length > 1);
+      if (selected && hasMenu) {
+        var sub = document.createElement('span');
+        sub.className = 'tab-sub';
+        sub.textContent = labelName(selected);
+        b.appendChild(sub);
+      }
+      if (hasMenu) {
+        var caret = document.createElement('span');
+        caret.className = 'tab-caret';
+        caret.setAttribute('aria-hidden', 'true');
+        b.appendChild(caret);
+      }
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (state.plateId === p.id) {
+          if (!hasMenu) { closeTabMenu(); return; }
+          if (menuPlateId === p.id && !menuOpenedByHover) closeTabMenu();
+          else openTabMenu(p.id, false);
+          return;
+        }
+        closeTabMenu();
         state.plateId = p.id;
         renderTabs();
         loadLabels();
       });
-      box.appendChild(b);
+      if (hasMenu) {
+        b.addEventListener('keydown', function (e) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            openTabMenu(p.id, false);
+            focusTabMenuItem(0);
+          } else if (e.key === 'Escape' && menuPlateId === p.id) {
+            e.preventDefault();
+            closeTabMenu();
+          }
+        });
+        b.addEventListener('pointerenter', function (e) {
+          if (e.pointerType && e.pointerType !== 'mouse') return;
+          clearTimeout(menuHoverClose);
+          clearTimeout(menuHoverOpen);
+          menuHoverOpen = setTimeout(function () { openTabMenu(p.id, true); }, 140);
+        });
+        b.addEventListener('pointerleave', function (e) {
+          if (e.pointerType && e.pointerType !== 'mouse') return;
+          clearTimeout(menuHoverOpen);
+          clearTimeout(menuHoverClose);
+          menuHoverClose = setTimeout(closeTabMenu, 260);
+        });
+      }
+      item.appendChild(b);
+      box.appendChild(item);
+    });
+    updateTabAria();
+  }
+  function fillTabMenu(plateId) {
+    var menu = document.getElementById('tabMenu');
+    var labels = labelsFor(plateId) || [];
+    menu.innerHTML = '';
+    if (!labels.length) {
+      var note = document.createElement('div');
+      note.className = 'tabmenu-note';
+      note.textContent = '暂无分类';
+      menu.appendChild(note);
+      return;
+    }
+    labels.forEach(function (l) {
+      var checked = plateId === state.plateId && l.exploreLabelId === state.labelId;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tabmenu-item' + (checked ? ' active' : '');
+      b.setAttribute('role', 'menuitemradio');
+      b.setAttribute('aria-checked', String(checked));
+      b.textContent = labelName(l);
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        selectLabel(plateId, l.exploreLabelId);
+      });
+      menu.appendChild(b);
     });
   }
-  function renderLabelBar() {
-    var box = document.getElementById('labelBar');
-    box.innerHTML = '';
-    if (state.keyword || state.labels.length <= 1) { hide('labelBar'); return; }
-    show('labelBar');
-    state.labels.forEach(function (l) {
-      var b = document.createElement('button');
-      b.className = 'chip' + (l.exploreLabelId === state.labelId ? ' active' : '');
-      b.textContent = ((l.exploreLabel || l.exploreLabelName || '') + '').trim() || ('分类 ' + l.exploreLabelId);
-      b.addEventListener('click', function () {
-        if (state.labelId === l.exploreLabelId) return;
-        state.labelId = l.exploreLabelId;
-        renderLabelBar();
-        loadVideos(true);
-      });
-      box.appendChild(b);
-    });
+  function positionTabMenu() {
+    var menu = document.getElementById('tabMenu');
+    var item = menuPlateId == null ? null : document.querySelector('#plateTabs .tab-item[data-plate="' + menuPlateId + '"]');
+    if (!item) return;
+    var rect = item.getBoundingClientRect();
+    var viewportW = window.innerWidth || document.documentElement.clientWidth || 360;
+    var viewportH = window.innerHeight || document.documentElement.clientHeight || 640;
+    menu.style.visibility = 'hidden';
+    menu.style.left = '0px';
+    menu.style.top = '0px';
+    var width = menu.offsetWidth, height = menu.offsetHeight;
+    var left = rect.left + rect.width / 2 - width / 2;
+    left = Math.max(8, Math.min(left, viewportW - width - 8));
+    var top = rect.bottom + 8;
+    if (top + height > viewportH - 8) top = Math.max(8, rect.top - height - 8);
+    menu.style.left = Math.round(left) + 'px';
+    menu.style.top = Math.round(top) + 'px';
+    menu.style.visibility = '';
+  }
+  function openTabMenu(plateId, byHover) {
+    var labels = labelsFor(plateId);
+    if (!labels || labels.length <= 1) return;
+    clearTimeout(menuHoverOpen);
+    clearTimeout(menuHoverClose);
+    menuPlateId = plateId;
+    menuOpenedByHover = !!byHover;
+    var menu = document.getElementById('tabMenu');
+    menu.classList.remove('hidden');
+    fillTabMenu(plateId);
+    positionTabMenu();
+    updateTabAria();
+  }
+  function closeTabMenu() {
+    clearTimeout(menuHoverOpen);
+    clearTimeout(menuHoverClose);
+    if (menuPlateId == null) return;
+    menuPlateId = null;
+    menuOpenedByHover = false;
+    var menu = document.getElementById('tabMenu');
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+    updateTabAria();
+  }
+  function focusTabMenuItem(index) {
+    var items = document.querySelectorAll('#tabMenu .tabmenu-item');
+    if (!items.length) return;
+    items[Math.max(0, Math.min(index, items.length - 1))].focus();
+  }
+  function selectLabel(plateId, labelId) {
+    closeTabMenu();
+    closeSearch(false);
+    if (state.keyword) {
+      state.keyword = '';
+      document.getElementById('searchInput').value = '';
+      document.getElementById('clearSearch').classList.add('hidden');
+      document.getElementById('searchToggle').classList.remove('searching');
+    }
+    state.plateId = plateId;
+    state.labels = labelsFor(plateId) || state.labels;
+    state.labelId = labelId;
+    renderTabs();
+    loadVideos(true);
+    // The tab button is rebuilt by renderTabs, so focus the new node.
+    var trigger = document.querySelector('#plateTabs .tab-item[data-plate="' + plateId + '"] .tab');
+    if (trigger) trigger.focus({ preventScroll: true });
   }
   function resetList() {
     state.revision += 1;
@@ -140,15 +323,15 @@
     var plateId = state.plateId;
     state.labelId = null;
     state.labels = [];
-    renderLabelBar();
+    renderTabs();
     if (state.keyword) { loadVideos(true); return; }
     try {
-      var data = await Core.apiGet('sp/getPlateLabelList', { plateId: plateId });
+      var labels = await loadPlateLabels(plateId);
       if (revision !== state.revision) return;
-      state.labels = (data.plateCenter && data.plateCenter.plateLabelList) || [];
-      if (!state.labels.length) throw new Error('该分区暂时没有分类');
-      state.labelId = state.labels[0].exploreLabelId;
-      renderLabelBar();
+      if (!labels.length) throw new Error('该分区暂时没有分类');
+      state.labels = labels;
+      state.labelId = labels[0].exploreLabelId;
+      renderTabs();
       await loadVideos(true);
     } catch (e) {
       if (revision !== state.revision) return;
@@ -178,11 +361,14 @@
           .then(function (data) { return { data: data }; }, function (error) { return { error: error }; });
       }));
       if (revision !== state.revision) return;
-      // Only commit consecutive successful pages, so failed pages are never skipped.
+      // Commit every page that arrived before the first failure, so one stalled
+      // request cannot discard the pages that already succeeded. The failed page
+      // stays uncommitted and is fetched again on the next scroll or retry.
+      var pageError = null, committed = 0;
       for (var i = 0; i < fetched.length; i++) {
-        if (fetched[i].error) throw fetched[i].error;
+        if (fetched[i].error) { pageError = fetched[i].error; break; }
         var videos = fetched[i].data && fetched[i].data.videoList;
-        if (!Array.isArray(videos)) throw new Error('视频列表格式异常');
+        if (!Array.isArray(videos)) { pageError = new Error('视频列表格式异常'); break; }
         var list = videos.filter(function (v) {
           if (!v || v.isAd || v.videoId == null) return false;
           var id = String(v.plateId || plateId) + ':' + String(v.videoId);
@@ -193,19 +379,26 @@
         });
         state.page = startPage + i;
         state.items = state.items.concat(list);
+        committed += 1;
         if (list.length) document.getElementById('grid').insertAdjacentHTML('beforeend', list.map(cardHtml).join(''));
         if (!videos.length || (!list.length && videos.some(function (v) { return v && !v.isAd; }))) {
           state.exhausted = true;
           break;
         }
       }
+      if (pageError && !committed) throw pageError;
       state.failCount = 0;
       var prefix = keyword ? '“' + keyword + '” · ' : '';
-      document.getElementById('listStatus').textContent = prefix + (!state.items.length && state.exhausted
-        ? (keyword ? '没有找到相关视频' : '暂无视频')
-        : (state.exhausted ? '已全部加载 ' : '已加载 ') + state.items.length + ' 条');
-      if (!state.exhausted && isSentinelNear()) {
-        setTimeout(function () { if (revision === state.revision) loadVideos(false); }, 100);
+      if (pageError) {
+        document.getElementById('listStatus').textContent = prefix + '已加载 ' + state.items.length + ' 条（部分请求超时，可点重新加载）';
+        show('retryList');
+      } else {
+        document.getElementById('listStatus').textContent = prefix + (!state.items.length && state.exhausted
+          ? (keyword ? '没有找到相关视频' : '暂无视频')
+          : (state.exhausted ? '已全部加载 ' : '已加载 ') + state.items.length + ' 条');
+        if (!state.exhausted && isSentinelNear()) {
+          setTimeout(function () { if (revision === state.revision) loadVideos(false); }, 100);
+        }
       }
     } catch (e) {
       if (revision !== state.revision) return;
@@ -457,6 +650,39 @@
   }
   document.addEventListener('click', dismissSearch);
   document.addEventListener('focusin', dismissSearch);
+  var tabMenuEl = document.getElementById('tabMenu');
+  tabMenuEl.addEventListener('pointerenter', function (e) {
+    if (e.pointerType && e.pointerType !== 'mouse') return;
+    clearTimeout(menuHoverClose);
+  });
+  tabMenuEl.addEventListener('pointerleave', function (e) {
+    if (e.pointerType && e.pointerType !== 'mouse') return;
+    clearTimeout(menuHoverClose);
+    menuHoverClose = setTimeout(closeTabMenu, 200);
+  });
+  tabMenuEl.addEventListener('keydown', function (e) {
+    var items = Array.prototype.slice.call(tabMenuEl.querySelectorAll('.tabmenu-item'));
+    var index = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!items.length) return;
+      e.preventDefault();
+      var step = e.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length].focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      var plate = menuPlateId;
+      closeTabMenu();
+      var trigger = plate == null ? null : document.querySelector('#plateTabs .tab-item[data-plate="' + plate + '"] .tab');
+      if (trigger) trigger.focus();
+    } else if (e.key === 'Tab') {
+      closeTabMenu();
+    }
+  });
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#tabMenu, #plateTabs .tab-item')) closeTabMenu();
+  });
+  document.getElementById('plateTabs').addEventListener('scroll', closeTabMenu, { passive: true });
+  window.addEventListener('resize', function () { if (menuPlateId != null) positionTabMenu(); });
   document.getElementById('searchForm').addEventListener('submit', function (e) {
     e.preventDefault();
     search(document.getElementById('searchInput').value);
@@ -483,6 +709,11 @@
   });
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
+    if (menuPlateId != null) {
+      e.preventDefault();
+      closeTabMenu();
+      return;
+    }
     if (document.getElementById('searchToggle').getAttribute('aria-expanded') === 'true') {
       e.preventDefault();
       closeSearch(true);

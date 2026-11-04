@@ -199,12 +199,126 @@
     for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     return arr;
   }
+  // Pure-JS AES-CBC decryption (decrypt-only, PKCS#7). crypto.subtle only
+  // exists in secure contexts, so pages served over plain HTTP (a LAN address,
+  // a phone hitting the desktop's IP) would otherwise be unable to read any
+  // API response, since every payload is AES encrypted.
+  var AES_GF = (function () {
+    var exp = new Uint8Array(512), log = new Uint8Array(256), x = 1, i;
+    function xt(a) { return ((a << 1) ^ ((a & 0x80) ? 0x1b : 0)) & 0xff; }
+    for (i = 0; i < 255; i++) { exp[i] = x; log[x] = i; x = xt(x) ^ x; }
+    for (i = 255; i < 512; i++) exp[i] = exp[i - 255];
+    return { exp: exp, log: log };
+  })();
+  function aesMul(a, b) { return (a && b) ? AES_GF.exp[AES_GF.log[a] + AES_GF.log[b]] : 0; }
+  var AES_SBOX = (function () {
+    var box = new Uint8Array(256);
+    for (var i = 0; i < 256; i++) {
+      var inv = i ? AES_GF.exp[255 - AES_GF.log[i]] : 0;
+      box[i] = (inv ^ ((inv << 1) | (inv >> 7)) ^ ((inv << 2) | (inv >> 6)) ^
+        ((inv << 3) | (inv >> 5)) ^ ((inv << 4) | (inv >> 4)) ^ 0x63) & 0xff;
+    }
+    return box;
+  })();
+  var AES_ISBOX = (function () {
+    var inv = new Uint8Array(256);
+    for (var i = 0; i < 256; i++) inv[AES_SBOX[i]] = i;
+    return inv;
+  })();
+  function aesExpandKey(key) {
+    var nk = key.length >> 2, rounds = nk + 6, total = 4 * (rounds + 1);
+    var w = new Uint8Array(total * 4);
+    w.set(key);
+    var rcon = 1;
+    for (var i = nk; i < total; i++) {
+      var t0 = w[(i - 1) * 4], t1 = w[(i - 1) * 4 + 1], t2 = w[(i - 1) * 4 + 2], t3 = w[(i - 1) * 4 + 3];
+      if (i % nk === 0) {
+        var tmp = t0;
+        t0 = AES_SBOX[t1] ^ rcon; t1 = AES_SBOX[t2]; t2 = AES_SBOX[t3]; t3 = AES_SBOX[tmp];
+        rcon = ((rcon << 1) ^ ((rcon & 0x80) ? 0x1b : 0)) & 0xff;
+      } else if (nk > 6 && i % nk === 4) {
+        t0 = AES_SBOX[t0]; t1 = AES_SBOX[t1]; t2 = AES_SBOX[t2]; t3 = AES_SBOX[t3];
+      }
+      w[i * 4] = w[(i - nk) * 4] ^ t0;
+      w[i * 4 + 1] = w[(i - nk) * 4 + 1] ^ t1;
+      w[i * 4 + 2] = w[(i - nk) * 4 + 2] ^ t2;
+      w[i * 4 + 3] = w[(i - nk) * 4 + 3] ^ t3;
+    }
+    return { w: w, rounds: rounds };
+  }
+  function aesDecryptBlock(input, w, rounds) {
+    var s = Uint8Array.from(input), t = new Uint8Array(16);
+    function addRoundKey(round) {
+      var off = round * 16;
+      for (var k = 0; k < 16; k++) s[k] ^= w[off + k];
+    }
+    function invShiftRows() {
+      t.set(s);
+      for (var row = 1; row < 4; row++) {
+        for (var col = 0; col < 4; col++) s[row + 4 * ((col + row) % 4)] = t[row + 4 * col];
+      }
+    }
+    function invSubBytes() { for (var k = 0; k < 16; k++) s[k] = AES_ISBOX[s[k]]; }
+    function invMixColumns() {
+      for (var col = 0; col < 4; col++) {
+        var o = 4 * col, a0 = s[o], a1 = s[o + 1], a2 = s[o + 2], a3 = s[o + 3];
+        s[o] = aesMul(a0, 14) ^ aesMul(a1, 11) ^ aesMul(a2, 13) ^ aesMul(a3, 9);
+        s[o + 1] = aesMul(a0, 9) ^ aesMul(a1, 14) ^ aesMul(a2, 11) ^ aesMul(a3, 13);
+        s[o + 2] = aesMul(a0, 13) ^ aesMul(a1, 9) ^ aesMul(a2, 14) ^ aesMul(a3, 11);
+        s[o + 3] = aesMul(a0, 11) ^ aesMul(a1, 13) ^ aesMul(a2, 9) ^ aesMul(a3, 14);
+      }
+    }
+    addRoundKey(rounds);
+    for (var round = rounds - 1; round >= 1; round--) {
+      invShiftRows(); invSubBytes(); addRoundKey(round); invMixColumns();
+    }
+    invShiftRows(); invSubBytes(); addRoundKey(0);
+    return s;
+  }
+  function aesCbcDecrypt(key, iv, data) {
+    if (!data.length || data.length % 16) throw new Error('AES 密文长度异常');
+    var schedule = aesExpandKey(key), out = new Uint8Array(data.length), prev = Uint8Array.from(iv);
+    for (var off = 0; off < data.length; off += 16) {
+      var ct = data.subarray(off, off + 16);
+      var block = aesDecryptBlock(ct, schedule.w, schedule.rounds);
+      for (var i = 0; i < 16; i++) out[off + i] = block[i] ^ prev[i];
+      prev = ct.slice();
+    }
+    return out;
+  }
+  function aesUnpad(bytes) {
+    var n = bytes[bytes.length - 1];
+    if (!n || n > 16 || n > bytes.length) throw new Error('AES 填充异常');
+    for (var i = bytes.length - n; i < bytes.length; i++) {
+      if (bytes[i] !== n) throw new Error('AES 填充异常');
+    }
+    return bytes.subarray(0, bytes.length - n);
+  }
+  function hasSubtle() {
+    return typeof crypto !== 'undefined' && crypto && crypto.subtle && typeof crypto.subtle.decrypt === 'function';
+  }
+  // WebCrypto is preferred; the JS cipher is the fallback for non-secure
+  // contexts. A broken subtle implementation also degrades to the fallback.
+  async function aesDecryptCbc(keyBytes, ivBytes, dataBytes) {
+    var subtleError = null;
+    if (hasSubtle()) {
+      try {
+        var key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+        var pt = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, key, dataBytes);
+        return new Uint8Array(pt);
+      } catch (e) { subtleError = e; }
+    }
+    try {
+      return aesUnpad(aesCbcDecrypt(keyBytes, ivBytes, dataBytes));
+    } catch (e) {
+      throw subtleError || e;
+    }
+  }
   async function aesDecryptB64(b64) {
     var keyBytes = new TextEncoder().encode(AES_KEY);
     var ivBytes = new TextEncoder().encode(AES_IV);
-    var key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
-    var pt = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, key, b64ToBytes(b64));
-    return new TextDecoder().decode(pt);
+    var plain = await aesDecryptCbc(keyBytes, ivBytes, b64ToBytes(b64));
+    return new TextDecoder().decode(plain);
   }
   async function parseReturn(j) {
     var d = j.returnData;
@@ -303,7 +417,7 @@
     var attempts = maxAttempts || 3;
     for (var attempt = 1; attempt <= attempts; attempt++) {
       try {
-        var resp = await fetchWithTimeout(url, options, 15000);
+        var resp = await fetchWithTimeout(url, options, 12000);
         if (resp.status >= 500 && attempt < attempts) {
           await sleepMs(500 * Math.pow(2, attempt - 1) + Math.random() * 400);
           continue;
@@ -430,9 +544,8 @@
     var d1 = md5Bytes(concatBytes(p, salt));
     var d2 = md5Bytes(concatBytes(d1, p, salt));
     var d3 = md5Bytes(concatBytes(d2, p, salt));
-    var key = await crypto.subtle.importKey('raw', concatBytes(d1, d2), { name: 'AES-CBC' }, false, ['decrypt']);
-    var pt = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: d3 }, key, ct);
-    return new TextDecoder().decode(pt);
+    var plain = await aesDecryptCbc(concatBytes(d1, d2), d3, ct);
+    return new TextDecoder().decode(plain);
   }
   function parsePublishDomains(list) {
     var found = [];
