@@ -20,17 +20,65 @@ function isolatedCore(fetch, storage = new Map(), cryptoImpl = crypto.webcrypto)
 }
 const reply = (returnValue, returnData = {}) => new Response(JSON.stringify({ returnValue, returnData }));
 
-test('menus follow source IDs and names in supported route order, with defaults for missing data', () => {
+test('menus expose only the configured sections and drop unknown paths', () => {
   const plates = Core.platesFromTabs({ plateList: [null, { plateVOList: [
     { plateId: '23', plateName: '更新名称', platePath: '/plate7' },
+    { plateId: 4, plateName: '短视频', platePath: '/plate1' },
+    { plateId: 6, plateName: 'AV', platePath: '/plate3' },
+    { plateId: 7, plateName: '动漫', platePath: '/plate4' },
     { plateId: 99, plateName: '未支持分区', platePath: '/other' },
-    { plateId: null, plateName: '无效', platePath: '/plate1' }
+    { plateId: null, plateName: '无效', platePath: '/plate1' },
+    { plateId: 8, plateName: '短剧合集', platePath: '/plate5' }
   ] }] });
-  assert.deepEqual(plates.map(p => p.path), ['/plate1', '/plate7', '/plate6', '/plate2']);
-  assert.equal(plates[1].id, 23);
-  assert.equal(plates[1].name, '更新名称');
-  assert.equal(plates[0].id, 4);
+  assert.deepEqual(plates.map(p => p.path), ['/plate7', '/plate1']);
+  assert.equal(plates[0].id, 23);
+  assert.equal(plates[0].name, '更新名称');
+  assert.deepEqual(Core.platesFromTabs(null), Core.DEFAULT_PLATES);
   assert.deepEqual(Core.platesFromTabs({ plateList: {} }), Core.DEFAULT_PLATES);
+  // Redirect-only hosts answer getNewTabList with a flat placeholder layout.
+  assert.deepEqual(Core.platesFromTabs({ plateList: [
+    { plateId: 10, platePath: '/plate1' },
+    { plateId: 15, platePath: '/dynamic1' }
+  ] }), []);
+  // Upstream also serves AV/动漫/短剧合集, but they are intentionally hidden.
+  assert.deepEqual(Core.DEFAULT_PLATES.map(p => p.path), ['/plate7', '/plate6', '/plate1', '/plate2']);
+  assert.deepEqual(Core.DEFAULT_PLATES.map(p => p.id), [22, 19, 4, 5]);
+});
+
+test('playback uses exactly one line, best quality first', () => {
+  assert.deepEqual(Core.pickVideoLine({ videoUrlOne: ' one ', videoUrlTwo: ' two ', videoUrlThree: ' three ' }),
+    { url: 'three', name: '高清线路', field: 'videoUrlThree' });
+  assert.deepEqual(Core.pickVideoLine({ videoUrlOne: 'one', videoUrlTwo: 'two', videoUrlThree: '' }),
+    { url: 'two', name: '优化线路', field: 'videoUrlTwo' });
+  assert.deepEqual(Core.pickVideoLine({ videoUrlOne: 'one', videoUrlTwo: null, videoUrlThree: '  ' }),
+    { url: 'one', name: '线路1', field: 'videoUrlOne' });
+  assert.equal(Core.pickVideoLine({ videoUrlOne: '', videoUrlTwo: '', videoUrlThree: null }), null);
+  assert.equal(Core.pickVideoLine(null), null);
+});
+
+test('known-dead anime detail host is rewritten to the live list host', () => {
+  assert.equal(Core.rewriteMediaUrl('https://st2dc.ybxzk33o1.top/dm/a.mp4?secure=1'),
+    'https://v.hersav.me/dm/a.mp4?secure=1');
+  assert.equal(Core.rewriteMediaUrl('https://ST2DC.ybxzk33o1.top/images/dm/a.jpg'),
+    'https://v.hersav.me/images/dm/a.jpg');
+  assert.equal(Core.rewriteMediaUrl('https://v.hersav.me/dm/a.mp4'), 'https://v.hersav.me/dm/a.mp4');
+  assert.equal(Core.rewriteMediaUrl('https://4wxxd.ybxzk33o1.top/amplify_video/a.mp4'), 'https://4wxxd.ybxzk33o1.top/amplify_video/a.mp4');
+  assert.equal(Core.rewriteMediaUrl('https://st2dc.ybxzk33o1.top/av/a.mp4'), 'https://st2dc.ybxzk33o1.top/av/a.mp4');
+  assert.equal(Core.rewriteMediaUrl(null), null);
+  assert.equal(Core.pickVideoLine({ videoUrlOne: 'https://st2dc.ybxzk33o1.top/dm/a.mp4' }).url,
+    'https://v.hersav.me/dm/a.mp4');
+});
+
+test('HLS quality lock picks the tallest variant', () => {
+  assert.equal(Core.highestLevelIndex([{ height: 270, bitrate: 1 }, { height: 1080, bitrate: 4 }, { height: 720, bitrate: 2 }]), 1);
+  assert.equal(Core.highestLevelIndex([{ width: 1920, height: 1080, bitrate: 2 }, { width: 1920, height: 1080, bitrate: 5 }]), 1);
+  assert.equal(Core.highestLevelIndex([{ width: 1080, height: 1920, bitrate: 2 }, { width: 1920, height: 1080, bitrate: 5 }]), 1);
+  assert.equal(Core.highestLevelIndex([]), -1);
+  assert.equal(Core.highestLevelIndex(null), -1);
+  assert.equal(Core.levelQuality({ width: 1920, height: 1080 }), '1080p');
+  assert.equal(Core.levelQuality({ width: 1080, height: 1920 }), '1080p');
+  assert.equal(Core.levelQuality({ height: 720 }), '720p');
+  assert.equal(Core.levelQuality(null), '');
 });
 
 test('detail routes preserve opaque and large source video IDs', () => {
@@ -111,15 +159,38 @@ test('server failure retries the same query against a healthy backup', async () 
 });
 
 test('rejected host recovery is bounded even if the target keeps rejecting', async () => {
-  let requests = 0;
+  let probes = 0;
   const core = isolatedCore(async url => {
-    if (url.includes('getPlateLabelList')) return reply(1, { plateCenter: { plateLabelList: [{ exploreLabelId: 1 }] } });
-    if (url.includes('getLabelVideoList')) return reply(1, { videoList: [] });
-    requests++;
+    if (url.includes('getNewTabList')) probes++;
     return reply(3);
   });
   await assert.rejects(core.apiGet('sp/getSearchList', {}), /3/);
-  assert.equal(requests, 2);
+  assert.equal(probes, 1);
+});
+
+test('host recovery rejects placeholder tenants and empty probe sections', async () => {
+  const core = isolatedCore(async (url, options) => {
+    const host = options.headers.url;
+    if (url.includes('getNewTabList')) {
+      if (host === 'good.example') {
+        return reply(1, { plateList: [{ plateVOList: [{ plateId: 22, plateName: '成人视频', platePath: '/plate7' }] }] });
+      }
+      if (host === 'bad.example') {
+        return reply(1, { plateList: [{ plateVOList: [{ plateId: 22, plateName: '成人视频', platePath: '/plate7' }] }] });
+      }
+      return reply(1, { plateList: [{ plateId: 10, platePath: '/plate1' }] });
+    }
+    if (url.includes('getPlateLabelList')) {
+      return reply(1, { plateCenter: { plateLabelList: [{ exploreLabelId: 39 }] } });
+    }
+    if (url.includes('getLabelVideoList')) {
+      return host === 'good.example' ? reply(1, { videoList: [{ videoId: '1' }] }) : reply(1, { videoList: [] });
+    }
+    return reply(3);
+  });
+  core.FRONT_HOSTS.push('bad.example', 'good.example');
+  assert.equal(await core.rotateFrontHost(), true);
+  assert.equal(core.getConfig().frontHost, 'good.example');
 });
 
 test('failed API rotation expires cached configuration', async () => {
@@ -130,7 +201,7 @@ test('failed API rotation expires cached configuration', async () => {
 });
 
 test('legacy config with a redirect-only front host is discarded', async () => {
-  const storage = new Map([['zdplayer_config_v1', JSON.stringify({
+  const storage = new Map([['zdplayer_config_v2', JSON.stringify({
     apiBase: Core.API_BASES[1], frontHost: 'zwfb.mmjvlook.top', publishPage: 'https://jvlook.top/', ts: Date.now()
   })]]);
   const core = isolatedCore(async url => reply(1, url.includes('getNewTabList') ? { plateList: [], publishPage: [] } : {}), storage);

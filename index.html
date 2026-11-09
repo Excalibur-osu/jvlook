@@ -34,7 +34,8 @@
 <div id="detailView" class="overlay hidden">
   <div class="playerBox">
     <video id="player" controls playsinline preload="metadata"></video>
-    <div id="playerHint" class="playerHint hidden">无法播放：HLS 组件加载失败且该视频没有 MP4 线路。<br>请检查网络（hls.js 需要联网加载），或返回列表换个视频。</div>
+    <div id="lineBadge" class="lineBadge hidden" aria-live="polite"></div>
+    <div id="playerHint" class="playerHint hidden">无法播放</div>
   </div>
 </div>
 

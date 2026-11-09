@@ -14,14 +14,20 @@
   // (zwfb.*, the publish page's "latest" entries) resolve to another CMS
   // tenant and would silently switch the app to the placeholder 类型1-4 data.
   var FRONT_HOSTS = ['jvlook.com', 'ifbbgjob.jvlookdp05.cn'];
-  var DEFAULT_PLATES = [
-    { id: 4, name: '短视频', path: '/plate1' },
+  // 2026-11-10: the source again serves /plate1 (短视频, 4) and /plate2
+  // (长视频, 5). It also serves /plate3 AV, /plate4 动漫 and /plate5 短剧合集,
+  // but this frontend intentionally exposes only the four sections below, in
+  // source order; platesFromTabs drops every other path.
+  var SUPPORTED_PLATES = [
     { id: 22, name: '成人视频', path: '/plate7' },
     { id: 19, name: '成人天堂', path: '/plate6' },
+    { id: 4, name: '短视频', path: '/plate1' },
     { id: 5, name: '长视频', path: '/plate2' }
   ];
+  var SUPPORTED_PATHS = SUPPORTED_PLATES.map(function (p) { return p.path; });
+  var DEFAULT_PLATES = SUPPORTED_PLATES;
   var PUBLISH_PAGES = ['https://jvlook.top/'];
-  var CONFIG_KEY = 'zdplayer_config_v2';
+  var CONFIG_KEY = 'zdplayer_config_v3';
   var CONFIG_TTL_MS = 24 * 3600 * 1000;
   var runtime = {
     apiBase: API_BASES[0],
@@ -161,17 +167,100 @@
   function hostHeader() {
     return runtime.frontHost;
   }
-  function platesFromTabs(data) {
-    var byPath = {};
+  function copyPlate(p) {
+    return { id: p.id, name: p.name, path: p.path };
+  }
+  function defaultPlates() {
+    return DEFAULT_PLATES.map(copyPlate);
+  }
+  // Only the nested tenant layout supported by this frontend is usable. A flat
+  // group with plateId/platePath belongs to the placeholder tenant served by
+  // redirect-only mirrors; it carries different IDs and different APIs.
+  function tabPlateEntries(data) {
+    var out = [];
     var groups = data && Array.isArray(data.plateList) ? data.plateList : [];
     groups.forEach(function (group) {
       var entries = group && Array.isArray(group.plateVOList) ? group.plateVOList : [];
       entries.forEach(function (p) {
-        if (!p || !/^\d+$/.test(String(p.plateId)) || Number(p.plateId) <= 0 || !p.plateName) return;
-        byPath[p.platePath] = { id: Number(p.plateId), name: String(p.plateName), path: p.platePath };
+        if (!p || !/^\d+$/.test(String(p.plateId)) || Number(p.plateId) <= 0 || !p.plateName || !p.platePath) return;
+        out.push({ id: Number(p.plateId), name: String(p.plateName), path: String(p.platePath) });
       });
     });
-    return DEFAULT_PLATES.map(function (p) { return byPath[p.path] || { id: p.id, name: p.name, path: p.path }; });
+    return out;
+  }
+  function platesFromTabs(data) {
+    // The pre-sync render and a failed tab request still need a menu.
+    if (!data || !Array.isArray(data.plateList)) return defaultPlates();
+    var entries = tabPlateEntries(data);
+    var plates = [];
+    entries.forEach(function (p) {
+      if (SUPPORTED_PATHS.indexOf(p.path) === -1) return;
+      if (plates.some(function (q) { return q.path === p.path; })) return;
+      plates.push(p);
+    });
+    return plates;
+  }
+  function canaryPlates(data) {
+    var entries = tabPlateEntries(data).filter(function (p) {
+      return /^\/plate\d+$/.test(p.path) && SUPPORTED_PATHS.indexOf(p.path) !== -1;
+    });
+    var ranked = [];
+    [22, 19, 4, 5].forEach(function (id) {
+      var found = entries.filter(function (p) { return p.id === id; })[0];
+      if (found && ranked.indexOf(found) === -1) ranked.push(found);
+    });
+    entries.forEach(function (p) { if (ranked.indexOf(p) === -1) ranked.push(p); });
+    return ranked;
+  }
+  // The anime detail endpoint aliases media to a host whose Cloudflare origin
+  // is currently down (530); the list endpoint serves the same paths on
+  // v.hersav.me. Rewrite only the known-dead host, preserving path and query.
+  // Drop this map when the detail endpoint starts returning a live host.
+  var MEDIA_HOST_ALIASES = { 'st2dc.ybxzk33o1.top': 'v.hersav.me' };
+  function rewriteMediaUrl(url) {
+    if (typeof url !== 'string') return url;
+    var m = /^(https?:\/\/)([^\/?#]+)([\s\S]*)$/.exec(url);
+    if (!m) return url;
+    var alias = MEDIA_HOST_ALIASES[m[2].toLowerCase()];
+    if (!alias) return url;
+    // Only the anime media/cover paths are known to exist on the live host.
+    if (m[3].indexOf('/dm/') !== 0 && m[3].indexOf('/images/dm/') !== 0) return url;
+    return m[1] + alias + m[3];
+  }
+  // Playback is fixed to a single source, in quality order: the source's 高清
+  // MP4, then the station-cached HLS, then the global HLS. The player never
+  // retries another line, so a failed line surfaces instead of switching.
+  function pickVideoLine(vd) {
+    if (!vd) return null;
+    var three = typeof vd.videoUrlThree === 'string' ? vd.videoUrlThree.trim() : '';
+    var two = typeof vd.videoUrlTwo === 'string' ? vd.videoUrlTwo.trim() : '';
+    var one = typeof vd.videoUrlOne === 'string' ? vd.videoUrlOne.trim() : '';
+    if (three) return { url: rewriteMediaUrl(three), name: '高清线路', field: 'videoUrlThree' };
+    if (two) return { url: rewriteMediaUrl(two), name: '优化线路', field: 'videoUrlTwo' };
+    if (one) return { url: rewriteMediaUrl(one), name: '线路1', field: 'videoUrlOne' };
+    return null;
+  }
+  function levelSide(level) {
+    if (!level) return 0;
+    var w = Number(level.width) || 0;
+    var h = Number(level.height) || 0;
+    return (w && h) ? Math.min(w, h) : (h || w);
+  }
+  // hls.js level lists are not guaranteed to be ordered by resolution; pick the
+  // tallest level and use bitrate only as a tie-breaker.
+  function highestLevelIndex(levels) {
+    if (!Array.isArray(levels) || !levels.length) return -1;
+    var best = 0;
+    for (var i = 1; i < levels.length; i++) {
+      var side = levelSide(levels[i]);
+      var bestSide = levelSide(levels[best]);
+      if (side > bestSide || (side === bestSide && (Number(levels[i].bitrate) || 0) > (Number(levels[best].bitrate) || 0))) best = i;
+    }
+    return best;
+  }
+  function levelQuality(level) {
+    var side = levelSide(level);
+    return side ? side + 'p' : '';
   }
   function parseDetailRoute(hash) {
     if (!/^#\/detail\?/.test(hash || '')) return null;
@@ -561,32 +650,36 @@
     }
     return found;
   }
-  async function verifyFrontHost(host) {
-    // A host is only usable when the API both resolves its labels and returns a
-    // video list. Redirect-only hosts still expose the old plate-4 labels but
-    // reject the list with rv 3, so checking labels alone is not enough.
+  function signedHeaders(host) {
     var g = getGuid();
     var ts = String(Date.now());
     var nc = nonce16();
-    var sign = md5(ts + g + nc + SALT).toUpperCase();
+    return baseHeaders(g, md5(ts + g + nc + SALT).toUpperCase(), ts, nc, host);
+  }
+  async function verifiedJson(pathAndQuery, host) {
+    var resp = await fetchWithTimeout(runtime.apiBase + pathAndQuery, { headers: signedHeaders(host) }, 6000);
+    if (!resp.ok) return null;
+    var j = await resp.json();
+    if (j.returnValue !== 1) return null;
+    return parseReturn(j);
+  }
+  async function verifyFrontHost(host) {
+    // A usable host must serve the nested tenant menu and at least one section
+    // with real videos. Redirect-only mirrors now answer the old plate-4 probe
+    // with rv 1 plus an empty videoList (previously rv 3), so accepting any
+    // array here would switch the whole app to a tenant that has no content.
     try {
-      var r1 = await fetchWithTimeout(runtime.apiBase + 'sp/getPlateLabelList?plateId=4', { headers: baseHeaders(g, sign, ts, nc, host) }, 6000);
-      if (!r1.ok) return false;
-      var j1 = await r1.json();
-      if (j1.returnValue !== 1) return false;
-      var d1 = await parseReturn(j1);
-      var ls = (d1 && d1.plateCenter && d1.plateCenter.plateLabelList) || [];
-      if (!ls.length || ls[0].exploreLabelId == null) return false;
-      var g2 = getGuid();
-      var ts2 = String(Date.now());
-      var nc2 = nonce16();
-      var sign2 = md5(ts2 + g2 + nc2 + SALT).toUpperCase();
-      var r2 = await fetchWithTimeout(runtime.apiBase + 'sp/getLabelVideoList?plateId=4&labelId=' + encodeURIComponent(ls[0].exploreLabelId) + '&page=1&size=1', { headers: baseHeaders(g2, sign2, ts2, nc2, host) }, 6000);
-      if (!r2.ok) return false;
-      var j2 = await r2.json();
-      if (j2.returnValue !== 1) return false;
-      var d2 = await parseReturn(j2);
-      return !!(d2 && Array.isArray(d2.videoList));
+      var tabs = await verifiedJson('sp/getNewTabList', host);
+      var canaries = canaryPlates(tabs);
+      for (var i = 0; i < canaries.length; i++) {
+        var canary = canaries[i];
+        var labelsData = await verifiedJson('sp/getPlateLabelList?plateId=' + canary.id, host);
+        var ls = (labelsData && labelsData.plateCenter && labelsData.plateCenter.plateLabelList) || [];
+        if (!ls.length || ls[0].exploreLabelId == null) continue;
+        var listData = await verifiedJson('sp/getLabelVideoList?plateId=' + canary.id + '&labelId=' + encodeURIComponent(ls[0].exploreLabelId) + '&page=1&size=2', host);
+        if (listData && Array.isArray(listData.videoList) && listData.videoList.length > 0) return true;
+      }
+      return false;
     } catch (e) { return false; }
   }
   var _frontRotation = null;
@@ -686,6 +779,8 @@
     API_BASE: API_BASE, SALT: SALT, AES_KEY: AES_KEY, AES_IV: AES_IV, NONCE_CHARS: NONCE_CHARS,
     API_BASES: API_BASES, FRONT_HOSTS: FRONT_HOSTS, DEFAULT_PLATES: DEFAULT_PLATES, CONFIG_KEY: CONFIG_KEY,
     platesFromTabs: platesFromTabs, parseDetailRoute: parseDetailRoute,
+    pickVideoLine: pickVideoLine, rewriteMediaUrl: rewriteMediaUrl,
+    highestLevelIndex: highestLevelIndex, levelQuality: levelQuality,
     md5: md5, nonce16: nonce16, newGuid: newGuid, getGuid: getGuid, deviceType: deviceType,
     hostHeader: hostHeader, signParams: signParams, aesDecryptB64: aesDecryptB64,
     apiGet: apiGet, apiPost: apiPost, ensureLogin: ensureLogin,

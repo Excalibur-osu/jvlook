@@ -4,7 +4,7 @@
   var PAGE_SIZE = 25;
   var MAX_INITIAL_ITEMS = 125;
   var state = {
-    plateId: 4,
+    plateId: PLATES.length ? PLATES[0].id : 22,
     keyword: '',
     revision: 0,
     labels: [],
@@ -16,9 +16,8 @@
     loading: false,
     failCount: 0,
     detail: null,
-    lines: [],
-    failedLines: {},
-    activeLine: 0
+    line: null,
+    playing: false
   };
   var hlsInstance = null;
   var detailRevision = 0;
@@ -44,6 +43,23 @@
   function setLoading(on, text) {
     document.getElementById('loading').classList.toggle('hidden', !on);
     document.getElementById('loadingText').textContent = text || '加载中…';
+  }
+  function hideLineBadge() {
+    var badge = document.getElementById('lineBadge');
+    if (!badge) return;
+    badge.classList.add('hidden');
+    badge.textContent = '';
+  }
+  function setLineBadge(name, quality) {
+    var badge = document.getElementById('lineBadge');
+    if (!badge || !name) { hideLineBadge(); return; }
+    badge.textContent = name + (quality ? ' · ' + quality : '');
+    badge.classList.remove('hidden');
+  }
+  function showPlayerHint(message) {
+    var hint = document.getElementById('playerHint');
+    hint.textContent = message;
+    hint.classList.remove('hidden');
   }
   var HLS_CDNS = [
     'https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js',
@@ -82,7 +98,7 @@
   }
   function cardHtml(v) {
     return '<div class="card" role="button" tabindex="0" data-plate="' + esc(v.plateId) + '" data-video="' + esc(v.videoId) + '">' +
-      '<div class="thumb"><img loading="lazy" src="' + esc(v.videoCover || '') + '" alt="" onerror="this.parentNode.classList.add(&quot;noimg&quot;);this.style.display=&quot;none&quot;">' +
+      '<div class="thumb"><img loading="lazy" src="' + esc(Core.rewriteMediaUrl(v.videoCover || '')) + '" alt="" onerror="this.parentNode.classList.add(&quot;noimg&quot;);this.style.display=&quot;none&quot;">' +
       (v.duration ? '<span class="dur">' + esc(fmtDur(v.duration)) + '</span>' : '') + '</div>' +
       '<div class="info"><div class="t">' + esc(v.videoTitle) + '</div>' +
       '<div class="u"><span class="u-name">' + esc(v.nickName || '') + '</span></div></div></div>';
@@ -498,79 +514,90 @@
     if (p === undefined) return;
     p.catch(function () {
       if (revision !== playbackRevision) return;
-      if (v.error) { playbackFailed('播放失败'); return; }
+      if (v.error) { failPlayback('播放失败'); return; }
       v.muted = true;
       var q = v.play();
-      if (q !== undefined) q.catch(function () {});
+      if (q !== undefined) {
+        q.catch(function () {
+          if (revision === playbackRevision) failPlayback('播放失败');
+        });
+      }
       toast('自动播放被浏览器限制，已静音播放；点播放器可开启声音');
     });
   }
   function destroyHls() {
     playbackRevision += 1;
+    state.playing = false;
     if (hlsInstance) { try { hlsInstance.destroy(); } catch (e) {} hlsInstance = null; }
     videoEl.pause();
     videoEl.muted = false;
     videoEl.removeAttribute('src');
     videoEl.load();
+    hideLineBadge();
   }
-  function buildLines(vd) {
-    var lines = [];
-    if (vd.videoUrlOne) lines.push({ n: 1, url: vd.videoUrlOne, name: (vd.videoUrlOne && vd.videoUrlTwo) ? '全球线路' : '线路1' });
-    if (vd.videoUrlTwo) lines.push({ n: 2, url: vd.videoUrlTwo, name: (vd.videoUrlOne && vd.videoUrlTwo) ? '优化线路' : '线路2' });
-    if (vd.videoUrlThree) lines.push({ n: 3, url: vd.videoUrlThree, name: '高清' });
-    return lines;
+  // A single line is chosen when the detail opens. It is never replaced by a
+  // fallback: a failure shows the hint instead of silently changing sources.
+  function failPlayback(message) {
+    if (!state.playing) return;
+    if (document.getElementById('detailView').classList.contains('hidden')) return;
+    destroyHls();
+    showPlayerHint(message + '。线路已固定，不会自动切换。');
   }
-  function preferredLine() {
-    for (var n = 3; n >= 1; n--) {
-      for (var i = 0; i < state.lines.length; i++) {
-        if (state.lines[i].n === n && !state.failedLines[i]) return i;
-      }
-    }
-    return -1;
-  }
-  function playbackFailed(message) {
-    if (document.getElementById('detailView').classList.contains('hidden') || !state.lines.length) return;
-    state.failedLines[state.activeLine] = true;
-    var next = preferredLine();
-    if (next >= 0) {
-      toast(message + '，已切换至' + state.lines[next].name);
-      playLine(next);
-    } else {
-      destroyHls();
-      toast(message + '，所有线路均不可用');
-    }
-  }
-  async function playLine(i) {
-    if (!state.lines[i]) return;
-    state.activeLine = i;
+  async function playFixed() {
+    var line = state.line;
+    if (!line) return;
     hide('playerHint');
     destroyHls();
+    state.playing = true;
     var revision = playbackRevision;
-    var url = state.lines[i].url;
-    videoEl.poster = (state.detail && state.detail.videoCover) || '';
+    var url = line.url;
+    videoEl.poster = Core.rewriteMediaUrl((state.detail && state.detail.videoCover) || '');
+    setLineBadge(line.name, '');
     if (!/\.m3u8/i.test(url)) {
       videoEl.src = url;
       autoplay(videoEl);
       return;
     }
-    if (!videoEl.canPlayType('application/vnd.apple.mpegurl')) await ensureHls();
+    // canPlayType('application/vnd.apple.mpegurl') answers "maybe" in current
+    // Chrome even though it cannot demux HLS, so it cannot gate hls.js. Always
+    // try hls.js first and keep native HLS for Safari, where MSE is unavailable.
+    var nativeHls = !!videoEl.canPlayType('application/vnd.apple.mpegurl');
+    if (!window.Hls) await ensureHls();
     if (revision !== playbackRevision) return;
     if (window.Hls && window.Hls.isSupported()) {
-      var h = new window.Hls({ enableWorker: true });
-      h.loadSource(url);
-      h.attachMedia(videoEl);
+      var h = new window.Hls({
+        enableWorker: true,
+        autoStartLoad: false,
+        capLevelToPlayerSize: false,
+        preserveManualLevelOnError: true
+      });
+      // Lock to the tallest variant before any fragment is requested, so ABR
+      // never starts at a lower level and then upshifts mid-playback.
+      h.on(window.Hls.Events.MANIFEST_PARSED, function () {
+        if (revision !== playbackRevision) return;
+        var best = Core.highestLevelIndex(h.levels);
+        if (best >= 0) {
+          h.currentLevel = best;
+          setLineBadge(line.name, Core.levelQuality(h.levels[best]));
+        }
+        h.startLoad();
+        autoplay(videoEl);
+      });
       h.on(window.Hls.Events.ERROR, function (evt, data) {
         if (revision !== playbackRevision || !data.fatal) return;
-        playbackFailed('HLS 播放失败');
+        failPlayback('HLS 播放失败' + (data.details ? '（' + data.details + '）' : ''));
       });
-      h.on(window.Hls.Events.MANIFEST_PARSED, function () { if (revision === playbackRevision) autoplay(videoEl); });
       hlsInstance = h;
-    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      h.attachMedia(videoEl);
+      h.loadSource(url);
+      return;
+    }
+    if (nativeHls) {
       videoEl.src = url;
       autoplay(videoEl);
-    } else {
-      playbackFailed('HLS 组件加载失败');
+      return;
     }
+    failPlayback('HLS 组件加载失败');
   }
   async function openDetail(plateId, videoId) {
     var revision = ++detailRevision;
@@ -579,18 +606,17 @@
     document.body.classList.add('noScroll');
     destroyHls();
     state.detail = null;
-    state.lines = [];
-    state.failedLines = {};
+    state.line = null;
     try {
       var data = await Core.apiGet('sp/getVideoDetail', { plateId: plateId, videoId: videoId });
       if (revision !== detailRevision) return;
       var vd = data.videoDetail;
       if (!vd) throw new Error('视频详情为空');
       state.detail = vd;
-      state.lines = buildLines(vd);
+      state.line = Core.pickVideoLine(vd);
       document.title = (vd.videoTitle || '播放') + ' · jvlook';
-      if (state.lines.length) {
-        playLine(preferredLine());
+      if (state.line) {
+        playFixed();
       } else toast('该视频没有可用线路');
     } catch (e) {
       if (revision !== detailRevision) return;
@@ -697,7 +723,11 @@
     if (!state.keyword && state.labelId == null) loadLabels();
     else loadVideos(false);
   });
-  videoEl.addEventListener('error', function () { playbackFailed('视频加载失败'); });
+  videoEl.addEventListener('error', function () { failPlayback('视频加载失败'); });
+  videoEl.addEventListener('loadedmetadata', function () {
+    if (!state.line) return;
+    setLineBadge(state.line.name, Core.levelQuality({ width: videoEl.videoWidth, height: videoEl.videoHeight }));
+  });
   document.getElementById('grid').addEventListener('click', openCard);
   document.getElementById('grid').addEventListener('keydown', function (e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -728,9 +758,14 @@
     try { await Core.bootstrap(false); } catch (e) { console.warn('[boot] 配置自愈失败，使用默认配置', e); }
     try { await Core.ensureLogin(); } catch (e) {}
     try {
-      PLATES = Core.platesFromTabs(await Core.apiGet('sp/getNewTabList'));
-      state.plateId = PLATES[0].id;
-      renderTabs();
+      var tabs = Core.platesFromTabs(await Core.apiGet('sp/getNewTabList'));
+      if (tabs.length) {
+        PLATES = tabs;
+        if (!PLATES.some(function (p) { return p.id === state.plateId; })) state.plateId = PLATES[0].id;
+        renderTabs();
+      } else {
+        console.warn('[tabs] 板块列表为空，保留默认菜单');
+      }
     } catch (e) { console.warn('[tabs] 板块同步失败，使用默认菜单', e); }
     var detail = Core.parseDetailRoute(location.hash);
     if (!detail) clearDetailHash();
